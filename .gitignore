@@ -1,0 +1,12 @@
+# Databases
+*.db*
+
+# Babashka / Clojure tooling
+.cpcache/
+.nrepl-port
+.clj-kondo/.cache/
+.lsp/
+
+# Local-only Claude Code files
+CLAUDE.local.md
+.claude/settings.local.json
