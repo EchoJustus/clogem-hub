@@ -11,6 +11,7 @@
  :deps {clogem/sdk {:local/root "../clogem-sdk"}}
  :tasks
  {:requires ([babashka.fs :as fs]
+             [babashka.process :as p]
              [clojure.string :as str]
              [clojure.test :as t])
 
@@ -48,20 +49,31 @@
              (System/exit 2))}
 
   guard:public
-  {:doc "Leak guard: workspace denylist, home paths, tokens, private files; tree and history."
+  {:doc "Leak guard: workspace denylist, home paths, tokens, private files. Tree and history; --staged scans the index only (pre-commit)."
    :requires ([clogem.sdk.guard :as guard])
-   :task (when-not (guard/guard! {:root "." :history? true})
+   :task (let [staged? (boolean (some #{"--staged"} *command-line-args*))]
+           (when-not (guard/guard! {:root "." :staged? staged? :history? (not staged?)})
+             (System/exit 1)))}
+
+  guard:message
+  {:doc "Leak guard over a commit message file (commit-msg hook): bb guard:message <file>."
+   :requires ([clogem.sdk.guard :as guard])
+   :task (when-not (guard/guard-message! {:root "." :file (first *command-line-args*)})
            (System/exit 1))}
 
   hooks:install
-  {:doc "Install .git/hooks/pre-commit so guard:public runs before every commit."
-   :task (let [hook (fs/path ".git" "hooks" "pre-commit")]
-           (fs/create-dirs (fs/parent hook))
-           (spit (str hook)
-                 (str "#!/bin/sh\n"
-                      "# Installed by `bb hooks:install`: blocks commits that would leak\n"
-                      "# private names, home paths or tokens into this public repository.\n"
-                      "cd \"$(git rev-parse --show-toplevel)\" || exit 1\n"
-                      "exec bb guard:public\n"))
-           (fs/set-posix-file-permissions hook "rwxr-xr-x")
-           (println (str "hooks:install: wrote " hook)))}}}
+  {:doc "Install pre-commit (guard:public --staged) and commit-msg (guard:message) hooks in git's hooks directory."
+   :task (let [dir (-> (p/shell {:out :string} "git" "rev-parse" "--git-path" "hooks")
+                       :out str/trim fs/path)
+               write! (fn [name body]
+                        (let [hook (fs/path dir name)]
+                          (fs/create-dirs dir)
+                          (spit (str hook) body)
+                          (fs/set-posix-file-permissions hook "rwxr-xr-x")
+                          (println (str "hooks:install: wrote " hook))))
+               banner (str "#!/bin/sh\n"
+                           "# Installed by `bb hooks:install`: blocks commits that would leak\n"
+                           "# private names, home paths or tokens into this public repository.\n"
+                           "cd \"$(git rev-parse --show-toplevel)\" || exit 1\n")]
+           (write! "pre-commit" (str banner "exec bb guard:public --staged\n"))
+           (write! "commit-msg" (str banner "exec bb guard:message \"$1\"\n")))}}}

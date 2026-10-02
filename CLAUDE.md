@@ -21,7 +21,7 @@ bb lint            # fitness checks; must be green before every commit
 bb dev             # daemon in the foreground with nREPL (S01)
 bb shim            # stdio MCP proxy to the running daemon (S01)
 bb guard:public    # leak guard: denylist + home paths + tokens + private files, tree and history
-bb hooks:install   # installs guard:public as .git/hooks/pre-commit
+bb hooks:install   # pre-commit (guard:public --staged) + commit-msg (guard:message) hooks
 ```
 
 `bb guard:public` reads `../.clogem/public-denylist.txt` from the private workspace (or

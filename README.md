@@ -12,10 +12,10 @@ bb lint            # fitness checks (license headers now; more rules from S01)
 bb dev             # daemon with nREPL (arrives in S01)
 bb shim            # stdio MCP proxy to the running daemon (arrives in S01)
 bb guard:public    # leak guard over the tree and git history
-bb hooks:install   # pre-commit hook that runs guard:public
+bb hooks:install   # pre-commit (guard:public --staged) and commit-msg (guard:message) hooks
 ```
 
-Requires Babashka 1.13.225 or newer and a sibling checkout of `clogem-sdk` (`../clogem-sdk`).
+Requires Babashka 1.13.225 or newer, a sibling checkout of `clogem-sdk` (`../clogem-sdk`), and a JVM on PATH for the first classpath resolution of that sibling dependency (cached afterwards).
 
 ## License
 
