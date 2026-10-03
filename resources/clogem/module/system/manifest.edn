@@ -1,0 +1,49 @@
+;; © 2026 EchoJustus (Email: EchoJustus.Studio@outlook.com)
+;;
+;; This program and the accompanying materials are made available under the
+;; terms of the Eclipse Public License 2.0 which is available at
+;; https://www.eclipse.org/legal/epl-2.0
+;;
+;; SPDX-License-Identifier: EPL-2.0
+
+;; Built-in `system` module: hub introspection and health.
+{:manifest/version 1
+ :module/id :system
+ :module/version "0.1.0"
+ :module/license :epl-2.0
+ :module/description "Hub introspection and health."
+ :module/entry clogem.module.system.core/module
+ :module/requires {:clogem/api "1" :bins [] :env #{}}
+ :bus {:publishes {} :subscribes #{}}
+ :db {:migrations nil}
+ :mcp {:tools [{:name "system_health"
+                :title "Hub health"
+                :description "Report daemon status and per-module readiness. Read-only; call it first to check that the hub is up and which modules are serving."
+                :handler clogem.module.system.tools/health
+                :input [:map {:closed true}]
+                :output [:map
+                         [:status [:enum "ok" "degraded"]]
+                         [:modules [:vector [:map [:id :string] [:status :string]]]]]
+                :annotations {:readOnlyHint true :idempotentHint true}
+                :meta {}
+                :profiles #{:gui :llm-small :llm-large :admin}}
+               {:name "system_list_modules"
+                :title "List modules"
+                :description "List every loaded module with its version, status and tool count. Read-only; use it to discover which capabilities this hub offers."
+                :handler clogem.module.system.tools/list-modules
+                :input [:map {:closed true}]
+                :output [:map
+                         [:modules [:vector [:map
+                                             [:id :string]
+                                             [:version :string]
+                                             [:status :string]
+                                             [:tools :int]
+                                             [:description :string]]]]]
+                :annotations {:readOnlyHint true :idempotentHint true}
+                :meta {}
+                :profiles #{:gui :llm-large :admin}}]
+       :resources []
+       :resource-templates []
+       :prompts []}
+ :ui {:card {:title "System" :icon "hub" :quick-actions ["system_health"]}
+      :routes []}}

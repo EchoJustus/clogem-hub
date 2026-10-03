@@ -16,7 +16,8 @@
              [clojure.test :as t])
 
   test
-  {:doc "Run clojure.test over test/**/*_test.clj."
+  {:doc "Run clojure.test over test/**/*_test.clj. The SDK's fictional echo module joins the test classpath as a second registry fixture."
+   :extra-paths ["../clogem-sdk/examples/echo/src" "../clogem-sdk/examples/echo/resources"]
    :task (let [files (if (fs/exists? "test") (fs/glob "test" "**_test.clj") [])
                ns-of (fn [f] (-> (str (fs/relativize "test" f))
                                  (str/replace (re-pattern "\\.clj$") "")
@@ -31,9 +32,13 @@
                    (when (pos? (+ fail error)) (System/exit 1))))))}
 
   lint
-  {:doc "Fitness checks: license headers (S00); ownership, isolation, pod and print rules from S01."
+  {:doc "Fitness checks: headers, namespace ownership, module isolation, pods only in clogem.hub.db.*, no prints outside clogem.hub.log, manifests, home paths."
    :requires ([clogem.sdk.lint :as lint])
-   :task (when-not (lint/lint! {:root "." :license :epl-2.0})
+   :task (when-not (lint/lint! {:root "." :license :epl-2.0
+                                :namespaces ["clogem.hub" "clogem.module.system" "clogem.module.media" "clogem.module.ui"]
+                                :pod-namespaces ["clogem.hub.db"]
+                                :log-namespace "clogem.hub.log"
+                                :no-print-prefixes ["clogem.hub" "clogem.module"]})
            (System/exit 1))}
 
   dev

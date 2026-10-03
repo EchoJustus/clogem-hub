@@ -23,6 +23,8 @@ Anything else is Ask-first.
 | Session | Dependency | Version | Purpose | Smoke test |
 |---|---|---|---|---|
 | S00 | `clogem/sdk` | `{:local/root "../clogem-sdk"}` | plugin contract, shared lint and guard | resolves through tools.deps (needs a JVM on PATH for the first classpath build) |
+| S01 | `metosin/malli` 0.20.2 | transitive via the SDK | tool argument validation, JSON Schema | see the SDK's deps.md |
+| S01 | built-ins `org.httpkit.server`, `babashka.http-client`, `cheshire.core`, `babashka.nrepl.server` | bb 1.13.225 | HTTP transport, stdio proxy client, JSON, dev nREPL | `run-server` binds 127.0.0.1 with `:port 0` and reports `server-port`; nREPL supports TCP only (no Unix sockets) |
 
 Classpath resolution for `:deps` goes through tools.deps, which Babashka runs on a JVM the
 first time (cached afterwards in `.cpcache/`). A plain `:paths`-only bb.edn needs no JVM.
