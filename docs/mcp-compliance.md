@@ -12,7 +12,7 @@ is the source of truth; the JSON Schema is generated from it.
 |---|---|---|
 | Modern | 2026-07-28 and later: stateless, every request self-describing through `params._meta`; no `initialize` handshake, no sessions | `SPEC/basic/versioning`, `SPEC/changelog` |
 | Legacy | 2025-11-25 and earlier: `initialize` → `notifications/initialized` handshake, `ping`, optional `Mcp-Session-Id` | `SPEC/basic/versioning`; `https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle` |
-| Dual-era | both, selected per request: modern `_meta` → stateless 2026-07-28; `initialize` → legacy semantics scoped to the stdio process or HTTP session | `SPEC/basic/versioning` ("Dual-era server") |
+| Dual-era | both, selected per request: modern `_meta` → stateless 2026-07-28; `initialize` → legacy semantics (the spec scopes them to the stdio process or HTTP session; the hub keeps no per-connection state and serves legacy requests statelessly, which the spec allows since a legacy server MAY assign a session) | `SPEC/basic/versioning` ("Dual-era server") |
 
 Why dual-era: Claude Code keeps stdio servers on the legacy `initialize` handshake by default
 (only `MCP_PROTOCOL_NEGOTIATION=auto` probes with `server/discover`), while its HTTP client asks
@@ -53,7 +53,7 @@ Era detection in the hub: a request whose `params._meta` carries
 | `initialize` | legacy | `protocolVersion`, `capabilities`, `clientInfo` | `protocolVersion` (requested if supported, else `2025-11-25`), `capabilities`, `serverInfo`, `instructions` | `…/2025-11-25/basic/lifecycle` |
 | `notifications/initialized` | legacy | notification | none (HTTP 202) | `…/2025-11-25/basic/lifecycle` |
 | `ping` | legacy only; removed in 2026-07-28 | none | `{}` (plus `resultType`/`_meta`, harmless in an open map) | `…/2025-11-25/basic/utilities/ping`; `SPEC/changelog` (removal) |
-| `notifications/cancelled` | both (stdio) | `requestId`, `reason?` | none; S01 handlers are synchronous so there is nothing to cancel | `SPEC/basic/patterns/cancellation` |
+| `notifications/cancelled` | both (stdio and HTTP; accepted with 202) | `requestId`, `reason?` | none; S01 handlers are synchronous so there is nothing to cancel | `SPEC/basic/patterns/cancellation` |
 | anything else | both | — | `-32601 Method not found`; HTTP 404 on modern requests | `SPEC/basic/transports/streamable-http` |
 
 Not in S01 (planned): `resources/list`, `resources/templates/list`, `resources/read`,
@@ -109,7 +109,7 @@ The hub uses `ttlMs 60000` and `cacheScope "private"` (lists vary by client prof
 | Base64 sentinel `=?base64?{Base64}?=` (lowercase markers) for non-ASCII or whitespace-padded header values; servers MUST decode before comparing | decoded before comparison | transports/streamable-http |
 | Header names case-insensitive, values case-sensitive | http-kit lower-cases names; values compared exactly | transports/streamable-http; RFC 9110 |
 | Unsupported version → `400` + `-32022`; unknown method → `404` + `-32601` | enforced for modern requests | transports/streamable-http |
-| Missing `MCP-Protocol-Version` MAY be treated as `2025-03-26` by servers supporting pre-2025-06-18 clients | legacy requests without the header are served as `2025-03-26`-era; a legacy request with an unknown version in the header → `400` + `-32022` | transports/streamable-http; `…/2025-11-25/basic/transports` |
+| Missing `MCP-Protocol-Version` MAY be treated as `2025-03-26` by servers supporting pre-2025-06-18 clients | legacy requests are served identically with or without the header (the three legacy revisions differ only in HTTP header handling, not in the methods the hub serves); an unknown version in the header → `400` + `-32022` | transports/streamable-http; `…/2025-11-25/basic/transports` |
 | Modern server receiving legacy traffic: ignore `Mcp-Session-Id` (never mint/echo), ignore `Last-Event-ID` | S01 mints no sessions; legacy requests are served statelessly (allowed: a legacy server MAY assign a session) | transports/streamable-http; 2025-11-25 transports |
 | Dual-era clients detect the era from a 400's body: a recognized modern error means modern | every 400 carries a well-formed modern JSON-RPC error body | transports/streamable-http |
 | Closing an SSE stream is cancellation; `X-Accel-Buffering: no` on SSE | no SSE in S01 | transports/streamable-http |

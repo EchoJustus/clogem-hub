@@ -5,7 +5,7 @@ Status: Accepted (S01, 2026-10-03)
 ## Context
 
 The hub serves local LLM hosts and a desktop GUI with capabilities that are implemented by
-several modules: built-in ones (`system`, `media`, `ui`) and others loaded at runtime from
+several modules: built-in ones (`system` now; `media` and `ui` in S04) and others loaded at runtime from
 `~/.config/clogem/modules.edn`. Each module needs state, external processes (ffmpeg, ffprobe,
 whisper-cli), a local LLM and a database. Splitting them into processes would multiply SQLite
 writers, ports and lifecycles on a single-user machine, and would let modules bypass the
@@ -44,8 +44,8 @@ daemon acting as an MCP client (v1).
 
 ## Consequences
 
-- Every module, built-in or not, is written the same way and tested against the SDK test kit
-  without a running hub.
+- Every module, built-in or not, is written the same way and, from S04, is tested against the
+  SDK test kit without a running hub.
 - A module failure is contained: it is reported in `system_health` and its tools disappear;
   the daemon keeps serving the others.
 - Handler errors are tool results with `isError`, never protocol errors, so a host can show

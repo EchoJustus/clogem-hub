@@ -10,8 +10,8 @@ The Clogem daemon: exactly one per OS user, a modular monolith. It owns the regi
 modules from their `manifest.edn`), the in-process `core.async` bus, the single-writer SQLite
 store, the MCP facade (Streamable HTTP on 127.0.0.1:7788 plus a stdio proxy), the process runner
 for ffmpeg/ffprobe/whisper-cli, the LLM provider adapter (Ollama first) and the runtime behind
-`clogem.api`. Built-in modules: `system`, `media`, `ui`. Proprietary modules may be loaded at
-runtime from `~/.config/clogem/modules.edn`; this repository never references them.
+`clogem.api`. Built-in modules: `system` (S01), `media` and `ui` (S04). Proprietary modules may be
+loaded at runtime from `~/.config/clogem/modules.edn`; this repository never references them.
 
 ## Commands
 
@@ -31,19 +31,21 @@ rules run. The denylist is never copied into this repository.
 ## Layout
 
 ```text
-LICENSE  README.md  CLAUDE.md  bb.edn  .gitignore  bin/clogem-open
-src/clogem/hub/{registry,bus,config,log,daemon,uri,runtime}.clj
-src/clogem/hub/{db,mcp,media,llm}/…        src/clogem/module/{system,media,ui}/…
-resources/clogem/module/<id>/manifest.edn  (+ migrations/)
-test/clogem/…   test/fixtures/…
-docs/adr/  docs/roadmap.md (public-safe)  docs/mcp-compliance.md  docs/deps.md
+LICENSE  README.md  CLAUDE.md  bb.edn  .gitignore
+src/clogem/hub/{registry,config,log,daemon,runtime}.clj   src/clogem/hub/mcp/{jsonrpc,methods,http,stdio}.clj
+src/clogem/module/system/{core,tools}.clj                resources/clogem/module/system/manifest.edn
+test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)
+docs/adr/  docs/mcp-compliance.md  docs/deps.md
+planned: bin/clogem-open (S07), src/clogem/hub/{bus,uri}.clj and db/ (S02), media/ llm/ and
+         module/{media,ui} (S04), resources/…/migrations/ (S02), docs/roadmap.md
 ```
 
 ## Rules
 
 - **Depends on the SDK:** `{:local/root "../clogem-sdk"}` (sibling checkout). Never copy SDK
   source into this repo; implement its runtime protocol. The SDK never depends on the hub.
-- **Namespaces:** only `clogem.hub.*` and the built-in modules `clogem.module.{system,media,ui}.*`.
+- **Namespaces:** only `clogem.hub.*` and the built-in modules `clogem.module.{system,media,ui}.*`
+  (`media` and `ui` from S04).
 - **Two channels (PD-2):** modules, built-in ones included, talk only through the bus and
   `clogem.api`. A module never requires `clogem.hub.*` or another module, never calls the MCP
   endpoint; no business logic in the MCP layer; the daemon is not an MCP client (v1).

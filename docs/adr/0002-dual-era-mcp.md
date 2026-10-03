@@ -23,8 +23,8 @@ while the hub is a single-user loopback daemon whose clients are local processes
   unknown methods). Everything else is legacy: `initialize` negotiates `2025-11-25`, `2025-06-18`
   or `2025-03-26` (echoing the requested one, else `2025-11-25`), `notifications/initialized` and
   `ping` are accepted, unknown methods stay HTTP 200 with `-32601`. The hub mints no session ids
-  for legacy clients (allowed: a server MAY assign one) and treats a missing
-  `MCP-Protocol-Version` header as a `2025-03-26`-era request.
+  for legacy clients (allowed: a server MAY assign one). Legacy requests are served identically
+  whatever `MCP-Protocol-Version` says or omits; an unknown value is `400 + -32022`.
 - **One result shape.** Every result, legacy included, carries `resultType "complete"` and
   `_meta io.modelcontextprotocol/serverInfo`; list results carry `ttlMs 60000` and
   `cacheScope "private"`. Legacy result types are open maps, so the extra keys are harmless and
