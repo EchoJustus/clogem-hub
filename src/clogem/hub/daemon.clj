@@ -36,11 +36,31 @@
             (throw (ex-info (str "built-in manifest missing: " r) {:resource r}))))
         builtin-manifests))
 
+(defn daemon-file-path
+  "Where this user's daemon records itself."
+  ([] (daemon-file-path (config/runtime-dir)))
+  ([dir] (str (fs/path dir "daemon.edn"))))
+
 (defn- write-daemon-file! [dir info]
   (fs/create-dirs dir)
-  (let [f (fs/path dir "daemon.edn")]
-    (spit (str f) (pr-str info))
-    (str f)))
+  (let [f (daemon-file-path dir)]
+    (spit f (pr-str info))
+    f))
+
+(defn read-daemon-file
+  "The running daemon's record from daemon.edn, or nil when the file is
+   missing, unreadable, or names a process that is no longer alive."
+  ([] (read-daemon-file (daemon-file-path)))
+  ([path]
+   (when (fs/exists? path)
+     (let [info (config/read-edn-file path)
+           pid (:pid info)]
+       (when (and (integer? (:port info))
+                  (or (nil? pid)
+                      (some-> (java.lang.ProcessHandle/of pid) (.map (reify java.util.function.Function (apply [_ h] (.isAlive ^java.lang.ProcessHandle h)))) (.orElse false))))
+         info)))))
+
+(declare stop!)
 
 (defn start!
   "Start the daemon. Options: :config (default load-config), :nrepl? (default
@@ -48,38 +68,48 @@
    for stop!."
   [{:keys [config nrepl? runtime-dir] :or {nrepl? false}}]
   (let [config (or config (config/load-config))
+        dir (or runtime-dir (config/runtime-dir))
+        ;; prove the runtime directory is writable before anything is started
+        _ (fs/create-dirs dir)
         rt (runtime/new-runtime config)
         reg (registry/new-registry {:runtime rt
                                     :on-change (fn [e] (log/debug {:msg "registry changed" :change (:change e) :module (:module e)}))})
-        _ (runtime/attach-registry! rt reg)
-        _ (load-builtins! reg)
-        port-ref (atom nil)
-        {:keys [host port allowed-origins]} (:http config)
-        server (hk/run-server (http/handler {:registry reg :profile :admin
-                                             :port port-ref :allowed-origins allowed-origins})
-                              {:ip host :port port :legacy-return-value? false})
-        actual-port (hk/server-port server)
-        _ (reset! port-ref actual-port)
-        nrepl-server (when nrepl? (nrepl/start-server! {:host "127.0.0.1" :port 0 :quiet true}))
-        nrepl-port (:port nrepl-server)
-        dir (or runtime-dir (config/runtime-dir))
-        info {:pid (.pid (java.lang.ProcessHandle/current))
-              :host host
-              :port actual-port
-              :version config/hub-version
-              :nrepl-port nrepl-port
-              :started-at (str (java.time.Instant/now))}
-        daemon-file (write-daemon-file! dir info)]
-    (log/info (assoc info :msg "daemon started" :daemon-file daemon-file
-                     :modules (registry/module-ids reg)))
-    {:config config :registry reg :runtime rt :server server
-     :nrepl nrepl-server :port actual-port :nrepl-port nrepl-port :daemon-file daemon-file}))
+        system (atom {:config config :registry reg :runtime rt})]
+    (try
+      (runtime/attach-registry! rt reg)
+      (load-builtins! reg)
+      (let [port-ref (atom nil)
+            {:keys [host port allowed-origins]} (:http config)
+            server (hk/run-server (http/handler {:registry reg :profile :admin
+                                                 :port port-ref :allowed-origins allowed-origins})
+                                  {:ip host :port port :legacy-return-value? false})
+            _ (swap! system assoc :server server)
+            actual-port (hk/server-port server)
+            _ (reset! port-ref actual-port)
+            nrepl-server (when nrepl? (nrepl/start-server! {:host "127.0.0.1" :port 0 :quiet true}))
+            _ (swap! system assoc :nrepl nrepl-server)
+            nrepl-port (:port nrepl-server)
+            info {:pid (.pid (java.lang.ProcessHandle/current))
+                  :host host
+                  :port actual-port
+                  :version config/hub-version
+                  :nrepl-port nrepl-port
+                  :started-at (str (java.time.Instant/now))}
+            daemon-file (write-daemon-file! dir info)]
+        (log/info (assoc info :msg "daemon started" :daemon-file daemon-file
+                         :modules (registry/module-ids reg)))
+        (swap! system assoc :port actual-port :nrepl-port nrepl-port :daemon-file daemon-file))
+      (catch Exception e
+        ;; never leave a bound listener or started modules behind
+        (stop! @system)
+        (throw e)))))
 
 (defn stop!
-  "Stop the HTTP listener and the nREPL, stop every module, remove daemon.edn."
+  "Stop the HTTP listener and the nREPL, stop every module, remove daemon.edn.
+   Tolerates a partially started system."
   [{:keys [server nrepl registry daemon-file]}]
-  (when server (hk/server-stop! server))
-  (when nrepl (nrepl/stop-server! nrepl))
+  (when server (try (hk/server-stop! server) (catch Exception e (log/warn {:msg "server stop failed" :error (ex-message e)}))))
+  (when nrepl (try (nrepl/stop-server! nrepl) (catch Exception e (log/warn {:msg "nrepl stop failed" :error (ex-message e)}))))
   (when registry (registry/stop-all! registry))
   (when (and daemon-file (fs/exists? daemon-file)) (fs/delete daemon-file))
   (log/info {:msg "daemon stopped"})

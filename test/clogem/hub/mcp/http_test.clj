@@ -134,7 +134,9 @@
         (is (= 400 (:status res)))
         (is (= -32700 (get-in (body-of res) [:error :code]))))
       (is (= -32600 (get-in (body-of (h (post "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]"))) [:error :code])))
-      (is (= 415 (:status (h (post "{}" {"content-type" "text/plain"}))))))))
+      (is (= 415 (:status (h (post "{}" {"content-type" "text/plain"})))))
+      (is (= 415 (:status (h (post "{}" {"content-type" "application/json-patch+json"})))) "exact media type")
+      (is (= 200 (:status (h (post {:jsonrpc "2.0" :id 1 :method "ping"} {"content-type" "application/json; charset=utf-8"})))) "parameters are fine"))))
 
 (deftest header-helpers
   (is (http/host-ok? "127.0.0.1:7788" 7788))

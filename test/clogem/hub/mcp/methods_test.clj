@@ -102,6 +102,30 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"arguments must be an object"
                           (methods/call-tool (deps) {:name "echo_say" :arguments [1]})))))
 
+(deftest json-arguments-are-decoded-to-the-malli-schema
+  ;; The advertised inputSchema is JSON: keywords, enums and uuids arrive as
+  ;; strings and integers may stand for doubles.
+  (let [typed (-> (manifest/read-manifest (io/resource "clogem/module/echo/manifest.edn"))
+                  (assoc-in [:mcp :tools 0 :input] [:map {:closed true}
+                                                    [:mode [:enum :fast :slow]]
+                                                    [:kind :keyword]
+                                                    [:speed [:double {:min 0.5 :max 2.5}]]
+                                                    [:id :uuid]])
+                  (assoc-in [:mcp :tools 0 :output] :map))
+        seen (atom nil)]
+    (with-redefs [clogem.module.echo.tools/say (fn [_ args] (reset! seen args) {})]
+      (let [rt (runtime/new-runtime config/defaults)
+            reg (registry/new-registry {:runtime rt})
+            _ (runtime/attach-registry! rt reg)
+            _ (registry/register! reg typed)
+            deps {:registry reg :profile :admin}
+            uuid "123e4567-e89b-12d3-a456-426614174000"
+            r (methods/call-tool deps {:name "echo_say" :arguments {:mode "fast" :kind "video" :speed 1 :id uuid}})]
+        (is (false? (:isError r)))
+        (is (= {:mode :fast :kind :video :speed 1.0 :id (parse-uuid uuid)} @seen))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"do not match"
+                              (methods/call-tool deps {:name "echo_say" :arguments {:mode "nope" :kind "v" :speed 1 :id uuid}})))))))
+
 (deftest era-detection
   (is (= :modern (methods/era {:params {:_meta {methods/meta-protocol-version "2026-07-28"}}})))
   (is (= :legacy (methods/era {:method "initialize" :params {:protocolVersion "2025-11-25"}})))

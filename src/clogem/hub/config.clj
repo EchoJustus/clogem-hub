@@ -69,9 +69,14 @@
     (merge-with deep-merge a b)
     (if (nil? b) a b)))
 
-(defn- parse-port [s]
+(defn- parse-port
+  "A port from an environment string; throws on anything that is not 0..65535
+   so a typo never falls back silently to the default port."
+  [s]
   (let [n (try (Long/parseLong s) (catch Exception _ nil))]
-    (when (and n (<= 0 n 65535)) n)))
+    (if (and n (<= 0 n 65535))
+      n
+      (throw (ex-info (str "CLOGEM_PORT must be 0..65535, got " (pr-str s)) {:value s})))))
 
 (defn validate
   "Throw ex-info when the configuration violates a directive."

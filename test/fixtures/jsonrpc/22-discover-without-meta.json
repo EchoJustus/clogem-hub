@@ -1,0 +1,1 @@
+{"request":{"jsonrpc":"2.0","id":22,"method":"server/discover"},"expect":{"jsonrpc":"2.0","id":22,"error":{"code":-32602,"data":{"supportedVersions":["2026-07-28","2025-11-25","2025-06-18","2025-03-26"]}}},"http_status":400}

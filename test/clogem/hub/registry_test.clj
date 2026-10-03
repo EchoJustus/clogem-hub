@@ -106,6 +106,34 @@
       (registry/register! reg (assoc echo-manifest :module/entry 'clogem.module.echo.core/missing))
       (is (empty? (registry/tools-for reg :admin))))))
 
+(deftest invalid-ids-never-poison-the-registry
+  (let [reg (fresh-registry (atom []))]
+    (registry/register! reg system-manifest)
+    (doseq [bad [(dissoc echo-manifest :module/id) (assoc echo-manifest :module/id "echo")]]
+      (let [e (registry/register! reg bad)]
+        (is (= :unavailable (:status e)))
+        (is (= :invalid-manifest (get-in e [:reason :type])))))
+    (is (= [:system] (registry/module-ids reg)))
+    (is (= :ok (:status (registry/status reg))))
+    (is (= ["system_health" "system_list_modules"] (map (comp :name :tool) (registry/tools-for reg :admin))))
+    (is (= ["system"] (map :id (registry/manifest-summaries reg))))))
+
+(deftest replacing-and-failing-modules-are-stopped
+  (let [reg (fresh-registry (atom []))
+        starts (atom 0) stops (atom 0)]
+    (with-redefs [clogem.module.echo.core/module {:start (fn [_] (swap! starts inc) {})
+                                                  :stop (fn [_] (swap! stops inc))
+                                                  :health (fn [_] {:status :ok})}]
+      (registry/register! reg echo-manifest)
+      (registry/register! reg echo-manifest)
+      (is (= [2 1] [@starts @stops]) "re-registering stops the previous instance")
+      (registry/unregister! reg :echo)
+      (is (= 2 @stops)))
+    (with-redefs [clogem.module.echo.core/module {:start (fn [_] {}) :health (fn [_] (throw (ex-info "sick" {})))}]
+      (let [e (registry/register! reg echo-manifest)]
+        (is (= :degraded (:status e)) "a throwing health check degrades, it does not fail the start")
+        (is (= "sick" (get-in e [:reason :health :error])))))))
+
 (deftest registry-wide-uniqueness-is-enforced
   (let [reg (fresh-registry (atom []))
         other (-> echo-manifest

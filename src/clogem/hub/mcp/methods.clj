@@ -18,6 +18,7 @@
             [clojure.string :as str]
             [malli.core :as m]
             [malli.error :as me]
+            [malli.transform :as mt]
             [clogem.hub.config :as config]
             [clogem.hub.log :as log]
             [clogem.hub.mcp.jsonrpc :as rpc]
@@ -86,10 +87,13 @@
   [message]
   (if (requested-version message) :modern :legacy))
 
-(defn unsupported-version-error [requested]
+(defn unsupported-version-error
+  "Legacy versions are reachable only through the initialize handshake, so a
+   modern request that declares one is told which modern versions exist."
+  [requested]
   (rpc/rpc-error unsupported-protocol-version
                  (str "Unsupported protocol version: " requested)
-                 {:supported supported-versions :requested requested}
+                 {:supported [modern-version] :requested requested}
                  400))
 
 (defn check-modern-meta!
@@ -144,9 +148,12 @@
                                                (registry/find-tool registry profile tool-name))]
     (when-not found
       (throw (rpc/rpc-error rpc/invalid-params (str "Unknown tool: " (pr-str tool-name)))))
-    (let [args (or (:arguments params) {})
-          input (m/schema (:input tool))]
-      (when-not (map? args)
+    (let [raw (or (:arguments params) {})
+          input (m/schema (:input tool))
+          ;; the advertised inputSchema is JSON: keywords, enums and uuids
+          ;; arrive as strings and integers may stand for doubles
+          args (when (map? raw) (m/decode input raw mt/json-transformer))]
+      (when-not (map? raw)
         (throw (rpc/rpc-error rpc/invalid-params "Invalid params: arguments must be an object")))
       (when-not (m/validate input args)
         (throw (rpc/rpc-error rpc/invalid-params "Invalid params: tool arguments do not match the input schema"
@@ -191,6 +198,9 @@
    errors; returns the result map otherwise."
   [deps method params message]
   (let [era (era message)]
+    (when (and (contains? message :id) (str/starts-with? (str method) "notifications/"))
+      (throw (rpc/rpc-error rpc/invalid-request
+                            (str "Invalid Request: " method " is a notification and must not carry an id"))))
     (when (= :modern era) (check-modern-meta! message))
     (case method
       "server/discover"
@@ -202,7 +212,8 @@
         ;; probed; answer it so dual-era clients recognize a modern server
         (throw (rpc/rpc-error rpc/invalid-params
                               "Invalid params: _meta io.modelcontextprotocol/protocolVersion is required"
-                              {:supportedVersions supported-versions})))
+                              {:supportedVersions supported-versions}
+                              400)))
 
       "tools/list" (list-tools deps params)
       "tools/call" (call-tool deps params)

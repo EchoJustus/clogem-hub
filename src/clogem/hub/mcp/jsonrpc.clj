@@ -48,7 +48,11 @@
   "Parse a JSON body. Returns {:message m} or {:error response}."
   [^String body]
   (try
-    {:message (json/parse-string body true)}
+    (let [values (doall (json/parsed-seq (java.io.StringReader. (str body)) true))]
+      (if (= 1 (count values))
+        {:message (first values)}
+        {:error (error-response nil parse-error
+                                (if (empty? values) "Parse error: empty body" "Parse error: exactly one JSON-RPC message per body"))}))
     (catch Exception _
       {:error (error-response nil parse-error "Parse error")})))
 

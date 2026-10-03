@@ -149,7 +149,7 @@
       (not (origin-ok? (get headers "origin") allowed-origins))
       (forbidden "Origin not allowed")
 
-      (not (str/starts-with? (str/lower-case content-type) "application/json"))
+      (not= "application/json" (-> content-type (str/split #";") first str/trim str/lower-case))
       (json-response 415 (rpc/error-response nil rpc/invalid-request
                                              "Unsupported Media Type: Content-Type must be application/json"))
 

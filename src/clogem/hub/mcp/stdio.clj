@@ -17,13 +17,20 @@
    frames only; everything else goes to stderr through clogem.hub.log."
   (:require [babashka.http-client :as http]
             [clogem.hub.config :as config]
+            [clogem.hub.daemon :as daemon]
             [clogem.hub.log :as log]
             [clogem.hub.mcp.http :as mcp-http]
             [clogem.hub.mcp.jsonrpc :as rpc]
             [clogem.hub.mcp.methods :as methods]))
 
-(defn daemon-url [config]
-  (str "http://127.0.0.1:" (get-in config [:http :port]) mcp-http/endpoint))
+(defn daemon-url
+  "The running daemon's endpoint: from daemon.edn when a live daemon has
+   recorded itself (it may run on another port or with another environment
+   than this proxy), else from the configuration."
+  [config]
+  (let [info (daemon/read-daemon-file)
+        port (or (:port info) (get-in config [:http :port]))]
+    (str "http://127.0.0.1:" port mcp-http/endpoint)))
 
 (defn headers-for
   "HTTP headers mirroring a parsed JSON-RPC message."

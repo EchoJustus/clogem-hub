@@ -44,6 +44,11 @@
   (testing "parse error has a null id"
     (is (= {:jsonrpc "2.0" :id nil :error {:code -32700 :message "Parse error"}}
            (:response (run "{not json")))))
+  (testing "exactly one JSON value per body"
+    (is (= -32700 (get-in (run "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"} garbage") [:response :error :code])))
+    (is (= -32700 (get-in (run "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}") [:response :error :code])))
+    (is (= -32700 (get-in (run "") [:response :error :code])))
+    (is (= -32700 (get-in (run "   ") [:response :error :code]))))
   (testing "batches are rejected"
     (is (= -32600 (get-in (run "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]") [:response :error :code]))))
   (testing "invalid request shapes"

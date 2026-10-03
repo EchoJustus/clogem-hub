@@ -75,6 +75,32 @@
   (is (nil? (stdio/forward! "http://127.0.0.1:1/mcp" "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"))
       "a notification to a dead daemon is dropped silently"))
 
+(deftest daemon-file-discovery
+  (let [dir (fs/create-temp-dir {:prefix "clogem-daemon-file"})
+        path (daemon/daemon-file-path (str dir))]
+    (try
+      (is (nil? (daemon/read-daemon-file path)) "missing file")
+      (spit path (pr-str {:pid (.pid (java.lang.ProcessHandle/current)) :port 4242 :host "127.0.0.1"}))
+      (is (= 4242 (:port (daemon/read-daemon-file path))) "a live pid is trusted")
+      (spit path (pr-str {:pid 999999999 :port 4242}))
+      (is (nil? (daemon/read-daemon-file path)) "a dead pid is ignored")
+      (spit path "[not a map]")
+      (is (nil? (daemon/read-daemon-file path)))
+      (finally (fs/delete-tree dir)))))
+
+(deftest start-failures-leave-nothing-behind
+  (let [dir (fs/create-temp-dir {:prefix "clogem-daemon-busy"})
+        first-system (daemon/start! {:config (config/load-config {:http {:port 0}}) :runtime-dir (str dir)})
+        busy (config/load-config {:http {:port (:port first-system)}})]
+    (try
+      (is (thrown? Exception (daemon/start! {:config busy :runtime-dir (str dir)})) "port in use")
+      (is (= 200 (:status (babashka.http-client/post (str "http://127.0.0.1:" (:port first-system) "/mcp")
+                                                      {:headers {"Content-Type" "application/json"}
+                                                       :body "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
+                                                       :throw false})))
+          "the first daemon keeps serving")
+      (finally (daemon/stop! first-system) (fs/delete-tree dir)))))
+
 (deftest daemon-lifecycle
   (with-daemon
     (fn [{:keys [port daemon-file registry]}]

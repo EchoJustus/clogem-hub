@@ -1,0 +1,1 @@
+{"request":{"jsonrpc":"2.0","id":23,"method":"notifications/initialized"},"expect":{"jsonrpc":"2.0","id":23,"error":{"code":-32600}}}

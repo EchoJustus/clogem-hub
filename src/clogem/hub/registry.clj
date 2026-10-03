@@ -60,6 +60,12 @@
                        handler))}
       resolved)))
 
+(defn- stop-entry! [{:keys [id entry state]}]
+  (when-let [stop (:stop entry)]
+    (try (stop state)
+         (catch Exception e
+           (log/warn {:msg "module stop failed" :module id :error (ex-message e)})))))
+
 (defn- unavailable [id manifest reason]
   (log/warn {:msg "module unavailable" :module id :reason reason})
   {:id id :manifest manifest :status :unavailable :reason reason})
@@ -85,7 +91,9 @@
           (try
             (let [ctx (module-ctx reg id manifest)
                   state ((:start entry) ctx)
-                  health (when-let [h (:health entry)] (h state))
+                  health (when-let [h (:health entry)]
+                           (try (h state)
+                                (catch Exception e {:status :degraded :error (ex-message e)})))
                   ok (= :ok (get health :status :ok))]
               (log/info {:msg "module started" :module id :status (if ok :ready :degraded)})
               {:id id :manifest manifest :entry entry :state state :handlers handlers
@@ -100,22 +108,23 @@
   "Register a manifest (a map). Returns the module entry; its :status says
    whether the module is :ready, :degraded or :unavailable (see :reason)."
   [reg manifest]
-  (let [id (:module/id manifest)
-        ;; only serving modules own names; an unavailable entry exposes nothing
-        others (->> (vals (dissoc (:modules @reg) id)) (filter serving?) (map :manifest))
-        conflicts (when (keyword? id) (manifest/check-registry (conj (vec others) manifest)))
-        entry (if (seq conflicts)
-                (unavailable id manifest {:type :conflict :problems conflicts})
-                (start-module reg manifest))]
-    (swap! reg assoc-in [:modules id] entry)
-    (notify! reg {:change :registered :module id :status (:status entry)})
-    entry))
-
-(defn- stop-entry! [{:keys [id entry state]}]
-  (when-let [stop (:stop entry)]
-    (try (stop state)
-         (catch Exception e
-           (log/warn {:msg "module stop failed" :module id :error (ex-message e)})))))
+  (let [id (:module/id manifest)]
+    (if-not (keyword? id)
+      ;; a manifest without a usable id cannot be stored under a key; report it
+      ;; without touching the registry so every projection keeps working
+      (unavailable id manifest {:type :invalid-manifest
+                                :problems (:problems (manifest/check manifest))})
+      (let [previous (get-in @reg [:modules id])
+            ;; only serving modules own names; an unavailable entry exposes nothing
+            others (->> (vals (dissoc (:modules @reg) id)) (filter serving?) (map :manifest))
+            conflicts (manifest/check-registry (conj (vec others) manifest))
+            _ (when previous (stop-entry! previous))
+            entry (if (seq conflicts)
+                    (unavailable id manifest {:type :conflict :problems conflicts})
+                    (start-module reg manifest))]
+        (swap! reg assoc-in [:modules id] entry)
+        (notify! reg {:change :registered :module id :status (:status entry)})
+        entry))))
 
 (defn unregister!
   "Stop and remove a module. Returns true when it was registered."
@@ -136,7 +145,7 @@
 (defn modules
   "Module entries ordered by id."
   [reg]
-  (->> (:modules @reg) vals (sort-by (comp name :id))))
+  (->> (:modules @reg) vals (sort-by (comp str :id))))
 
 (defn module-ids [reg] (mapv :id (modules reg)))
 

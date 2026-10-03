@@ -38,7 +38,7 @@ Era detection in the hub: a request whose `params._meta` carries
 | Every result carries `resultType` (`"complete"`; `"input_required"` is MRTR); older servers' results without it are read as complete | every hub result has `resultType "complete"`, also on legacy requests (legacy `Result` is an open map) | `SPEC/basic`, `SPEC/schema` |
 | Servers SHOULD put `io.modelcontextprotocol/serverInfo` (`name`, `version`) in every result's `_meta` | done on every result | `SPEC/basic` |
 | Every modern request MUST carry `_meta["io.modelcontextprotocol/protocolVersion"]` and `_meta["io.modelcontextprotocol/clientCapabilities"]`; missing → `-32602`, HTTP 400 | enforced for modern requests | `SPEC/basic`, `SPEC/schema` (RequestMetaObject) |
-| Unsupported protocol version → `-32022` with `data.supported` and `data.requested`; HTTP 400 | enforced | `SPEC/basic/versioning`, `SPEC/schema` |
+| Unsupported protocol version → `-32022` with `data.supported` and `data.requested`; HTTP 400 | enforced; `data.supported` lists the modern versions only, because legacy versions are reachable solely through `initialize` | `SPEC/basic/versioning`, `SPEC/schema` |
 | Servers MUST NOT infer capabilities, version or identity from earlier requests; a stdio process is not a session | no per-connection state in S01 | `SPEC/basic` |
 | Servers never initiate JSON-RPC requests (server→client input only via MRTR) | hub sends none | `SPEC/basic/patterns`, `SPEC/basic/patterns/mrtr` |
 | JSON Schema dialect defaults to 2020-12 when `$schema` is absent | hub emits 2020-12 shapes without `$schema` | `SPEC/basic` |
@@ -47,7 +47,7 @@ Era detection in the hub: a request whose `params._meta` carries
 
 | Method | Era | Request | Result | Source |
 |---|---|---|---|---|
-| `server/discover` | modern (MUST implement) | only `_meta` | `resultType`, `supportedVersions`, `capabilities`, `instructions`, `ttlMs`, `cacheScope`, `_meta.serverInfo` | `SPEC/server/discover`, `SPEC/basic/versioning` |
+| `server/discover` | modern (MUST implement); without `_meta` → `400` + `-32602` naming `supportedVersions` so a probing client recognizes a modern server | only `_meta` | `resultType`, `supportedVersions`, `capabilities`, `instructions`, `ttlMs`, `cacheScope`, `_meta.serverInfo` | `SPEC/server/discover`, `SPEC/basic/versioning` |
 | `tools/list` | both | optional `cursor` (an unknown cursor → `-32602`) | `tools[]`, deterministic order (module id, tool name), `ttlMs`, `cacheScope`, no `nextCursor` (single page) | `SPEC/server/tools`, `SPEC/server/utilities/caching`, `SPEC/server/utilities/pagination` |
 | `tools/call` | both | `name`, `arguments` | `content[]` (text block with the serialized `structuredContent`), `structuredContent`, `isError` | `SPEC/server/tools` |
 | `initialize` | legacy | `protocolVersion`, `capabilities`, `clientInfo` | `protocolVersion` (requested if supported, else `2025-11-25`), `capabilities`, `serverInfo`, `instructions` | `…/2025-11-25/basic/lifecycle` |
@@ -102,7 +102,9 @@ The hub uses `ttlMs 60000` and `cacheScope "private"` (lists vary by client prof
 | Servers MUST validate `Origin`: present and invalid → `403 Forbidden` (body MAY be an id-less JSON-RPC error); SHOULD bind 127.0.0.1 | absent Origin accepted; `http(s)://127.0.0.1[:port]`, `localhost`, `[::1]` and configured `:allowed-origins` accepted; anything else (including `null`) → 403 with an id-less JSON-RPC error | transports/streamable-http |
 | Host header check (DNS-rebinding defence, house rule) | `Host` must be `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` (bare host when the port is 80) → else 403 | house rule; rationale: transports/streamable-http "DNS rebinding" |
 | Client MUST send `Accept: application/json, text/event-stream`; server answers JSON (one object) or SSE | hub answers `application/json` only in S01; `Accept` is not enforced (legacy clients vary) | transports/streamable-http |
-| Request body `Content-Type: application/json` | else `415 Unsupported Media Type` | spec examples; house rule |
+| Request body `Content-Type: application/json` (media type compared exactly; parameters such as `charset` allowed) | else `415 Unsupported Media Type` | spec examples; house rule |
+| Exactly one JSON value per body | trailing bytes, concatenated messages or an empty body → `400` + `-32700` | transports/streamable-http |
+| A request (with id) named `notifications/*` | `-32600 Invalid Request` | `SPEC/basic` (notifications carry no id) |
 | Accepted notification → `202 Accepted`, no body; rejected → 4xx with optional id-less error | `202`; a notification-shaped body that fails framing → 400 with a JSON-RPC error | transports/streamable-http |
 | Every modern POST MUST carry `MCP-Protocol-Version` equal to `_meta…/protocolVersion`; mismatch or missing → `400` + `-32020 HeaderMismatch` | enforced for modern requests | transports/streamable-http |
 | `Mcp-Method` (= `method`) REQUIRED on all modern requests; `Mcp-Name` (= `params.name` / `params.uri`) on `tools/call`, `resources/read`, `prompts/get`; mismatch/missing → `400` + `-32020` | enforced for modern requests; `Mcp-Name` checked only for those three methods | transports/streamable-http (SEP-2243) |
@@ -127,6 +129,7 @@ JSON-only content type bound the exposure until S03 adds bearer tokens (hub ADR-
 | Dual-era clients probe stdio servers with `server/discover`; legacy clients send `initialize` | both are answered by the daemon through the proxy | transports/stdio, versioning |
 | Server SHOULD exit promptly on stdin EOF | the proxy exits on EOF | transports/stdio |
 | Cancellation on stdio is `notifications/cancelled` | forwarded as a notification; nothing to cancel in S01 | transports/stdio |
+| Daemon discovery | the proxy reads `daemon.edn` from the runtime directory (port of a live pid), falling back to the configured port | house rule (PD-4) |
 | Daemon unreachable | the proxy answers the request itself with `-32603` and `data.reason "daemon unavailable"`, and prints one clear line on stderr | house rule (PD-4) |
 
 ## Claude Code specifics (`https://code.claude.com/docs/en/mcp`)
