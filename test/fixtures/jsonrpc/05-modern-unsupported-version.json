@@ -1,0 +1,1 @@
+{"request":{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2099-01-01","io.modelcontextprotocol/clientCapabilities":{}}}},"expect":{"jsonrpc":"2.0","id":5,"error":{"code":-32022,"data":{"requested":"2099-01-01","supported":["2026-07-28","2025-11-25","2025-06-18","2025-03-26"]}}},"http_status":400}

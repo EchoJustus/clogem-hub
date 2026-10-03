@@ -18,8 +18,8 @@ runtime from `~/.config/clogem/modules.edn`; this repository never references th
 ```sh
 bb test            # clojure.test over test/**/*_test.clj
 bb lint            # fitness checks; must be green before every commit
-bb dev             # daemon in the foreground with nREPL (S01)
-bb shim            # stdio MCP proxy to the running daemon (S01)
+bb dev             # daemon in the foreground; nREPL on a random loopback port, both recorded in daemon.edn
+bb shim            # stdio MCP proxy to the running daemon
 bb guard:public    # leak guard: denylist + home paths + tokens + private files, tree and history
 bb hooks:install   # pre-commit (guard:public --staged) + commit-msg (guard:message) hooks
 ```
@@ -81,5 +81,8 @@ docs/adr/  docs/roadmap.md (public-safe)  docs/mcp-compliance.md  docs/deps.md
   `destructiveHint`/`idempotentHint`; resources `clogem://<module>/<kind>/<id>`; integer
   milliseconds internally; XDG paths; `clojure.edn` only for external EDN, never `eval`.
 - **Guardrails are executable (PD-12):** never weaken, skip or delete a lint, guard or test.
-- **ADRs:** `docs/adr/NNNN-slug.md`, public-safe. S01 adds 0001 (modular monolith, two channels)
-  and 0002 (dual-era MCP support). Session logs never live here.
+- **MCP (S01):** `docs/mcp-compliance.md` is the rule book (every method, header, status and error
+  code with its source). Dual-era: modern requests carry `params._meta`; `initialize`/`ping` are
+  legacy. Every result has `resultType` and `_meta serverInfo`; lists carry `ttlMs`/`cacheScope`.
+- **ADRs:** `docs/adr/NNNN-slug.md`, public-safe: 0001 modular monolith and two channels, 0002
+  dual-era MCP, loopback-only and unauthenticated until S03. Session logs never live here.

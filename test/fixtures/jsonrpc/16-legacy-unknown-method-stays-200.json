@@ -1,0 +1,1 @@
+{"request":{"jsonrpc":"2.0","id":16,"method":"resources/list"},"expect":{"jsonrpc":"2.0","id":16,"error":{"code":-32601}}}

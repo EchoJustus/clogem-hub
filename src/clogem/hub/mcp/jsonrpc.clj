@@ -33,9 +33,14 @@
   {:jsonrpc "2.0" :id id :result result})
 
 (defn rpc-error
-  "An exception the dispatch function throws to answer with a protocol error."
+  "An exception the dispatch function throws to answer with a protocol error.
+   `http-status` is the status an HTTP transport must use for this error
+   (the MCP spec mandates 400 or 404 for some codes); nil means the
+   transport's default."
   ([code message] (rpc-error code message nil))
-  ([code message data] (ex-info message {::code code ::data data})))
+  ([code message data] (rpc-error code message data nil))
+  ([code message data http-status]
+   (ex-info message {::code code ::data data ::http-status http-status})))
 
 (defn valid-id? [id] (or (string? id) (integer? id)))
 
@@ -92,17 +97,17 @@
                              (catch Exception _ nil))
                         {:kind :notification :response nil})
       :request (let [id (:id m)]
-                 {:kind :request
-                  :response
-                  (try
-                    (result-response id (dispatch (:method m) (:params m) m))
-                    (catch clojure.lang.ExceptionInfo e
-                      (let [{::keys [code data]} (ex-data e)]
-                        (if code
-                          (error-response id code (ex-message e) data)
-                          (error-response id internal-error "Internal error"))))
-                    (catch Exception _
-                      (error-response id internal-error "Internal error")))}))))
+                 (try
+                   {:kind :request
+                    :response (result-response id (dispatch (:method m) (:params m) m))}
+                   (catch clojure.lang.ExceptionInfo e
+                     (let [{::keys [code data http-status]} (ex-data e)]
+                       (if code
+                         (cond-> {:kind :request :response (error-response id code (ex-message e) data)}
+                           http-status (assoc :http-status http-status))
+                         {:kind :request :response (error-response id internal-error "Internal error")})))
+                   (catch Exception _
+                     {:kind :request :response (error-response id internal-error "Internal error")}))))))
 
 (defn handle-body
   "Parse and dispatch a request body. Returns {:kind k :response r}."

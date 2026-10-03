@@ -1,0 +1,1 @@
+{"request":{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"echo_say","arguments":{"text":""}}},"expect":{"jsonrpc":"2.0","id":15,"error":{"code":-32602,"data":{"errors":{"text":["should be at least 1 character"]}}}}}

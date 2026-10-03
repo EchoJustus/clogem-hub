@@ -42,16 +42,14 @@
            (System/exit 1))}
 
   dev
-  {:doc "Run the daemon in the foreground with an nREPL server (clogem.hub.daemon, S01)."
-   :task (do (binding [*out* *err*]
-               (println "dev: clogem.hub.daemon is scheduled for S01"))
-             (System/exit 2))}
+  {:doc "Run the daemon in the foreground on 127.0.0.1 (port from config or CLOGEM_PORT) with an nREPL on a random loopback port; daemon.edn records both."
+   :requires ([clogem.hub.daemon :as daemon])
+   :task (daemon/-main)}
 
   shim
-  {:doc "Run the stdio MCP proxy to the daemon (clogem.hub.mcp.stdio, S01)."
-   :task (do (binding [*out* *err*]
-               (println "shim: clogem.hub.mcp.stdio is scheduled for S01"))
-             (System/exit 2))}
+  {:doc "The stdio MCP door: proxy newline-delimited JSON-RPC on stdin/stdout to the running daemon."
+   :requires ([clogem.hub.mcp.stdio :as stdio])
+   :task (stdio/-main)}
 
   guard:public
   {:doc "Leak guard: workspace denylist, home paths, tokens, private files. Tree and history; --staged scans the index only (pre-commit)."

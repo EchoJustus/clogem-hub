@@ -1,0 +1,1 @@
+{"request":{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"nope","arguments":{}}},"expect":{"jsonrpc":"2.0","id":14,"error":{"code":-32602}}}

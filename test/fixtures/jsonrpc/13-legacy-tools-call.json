@@ -1,0 +1,1 @@
+{"request":{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"system_health","arguments":{}}},"expect":{"jsonrpc":"2.0","id":13,"result":{"isError":false,"structuredContent":{"status":"ok","modules":[{"id":"echo","status":"ready"},{"id":"system","status":"ready"}]}}}}
