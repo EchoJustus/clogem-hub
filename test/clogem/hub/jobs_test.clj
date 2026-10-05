@@ -97,6 +97,9 @@
       (is (= {:ok false :error {:type :not-found :id nil}} (jobs/handle deps :echo :get {})))
       (is (= {:ok false :error {:type :unknown-op :op :pause :ops [:cancel :complete :create :fail :get :progress]}}
              (jobs/handle deps :echo :pause {})))
+      (is (= {:ok false :error {:type :invalid-job :problems ["value is not plain EDN"]}}
+             (jobs/handle deps :echo :create {:kind "x" :input {:f (fn [] 1)}}))
+          "values that would read back as strings are refused")
       (is (empty? (jobs/list-jobs (:store deps) {})))
       (testing "a caller-chosen id is kept and must be unique"
         (is (= "my-job" (get-in (jobs/handle deps :echo :create {:kind "x" :id "my-job"}) [:result :id])))

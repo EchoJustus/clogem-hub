@@ -40,7 +40,17 @@
 
 (defn- now [] (System/currentTimeMillis))
 
-(defn- edn-str [v] (when (some? v) (pr-str v)))
+(defn- edn-str
+  "`v` as EDN text, or an :invalid-job throw when pr-str cannot round-trip
+   it (records, functions, objects): the reader would hand back a string."
+  [v]
+  (when (some? v)
+    (let [s (pr-str v)]
+      (try (edn/read-string {:eof nil} s)
+           (catch Exception _
+             (throw (ex-info "job data must be plain EDN (maps, vectors, strings, numbers, keywords)"
+                             {:type :invalid-job :problems ["value is not plain EDN"]}))))
+      s)))
 
 (defn- read-edn
   "Our own EDN text back to data; the raw string when it does not read."
@@ -93,8 +103,13 @@
       (not (owner? job module)) {:ok false :error {:type :not-owner :id id :owner (:module job)}}
       :else {:ok false :error {:type :job-finished :id id :status (:status job)}})))
 
+(def ^:private event-status
+  {:job/progress :running :job/completed :done :job/failed :failed :job/cancelled :cancelled})
+
 (defn- change!
-  "Run one UPDATE on an open job owned by `module` and publish `etype`."
+  "Run one UPDATE on an open job owned by `module` and publish `etype`. The
+   event is published only when the row read back still shows the state
+   this update set; a concurrent later change publishes its own event."
   [{:keys [store bus]} module id set-clause params etype]
   (cond
     (not (and (string? id) (not (str/blank? id)))) (invalid ":id must be a non-blank string")
@@ -102,10 +117,15 @@
     (let [sql (str "UPDATE jobs SET " set-clause ", updated_at = ? WHERE id = ? AND " open-statuses
                    (when-not (= :hub module) " AND module = ?"))
           args (concat params [(now) id] (when-not (= :hub module) [(name module)]))
-          reply (store/tx! store module [(into [sql] args)])]
+          reply (try (store/tx! store module [(into [sql] args)])
+                     (catch clojure.lang.ExceptionInfo e
+                       (if (= :invalid-job (:type (ex-data e))) {:ok false :error (ex-data e)} (throw e))))]
       (cond
         (not (:ok reply)) reply
-        (= 1 (get-in reply [:result :rows-affected])) {:ok true :result (publish! bus etype (get-job store id))}
+        (= 1 (get-in reply [:result :rows-affected]))
+        (let [job (get-job store id)]
+          (when (= (event-status etype) (:status job)) (publish! bus etype job))
+          {:ok true :result job})
         :else (explain-no-change store module id)))))
 
 (defn create!
@@ -118,9 +138,11 @@
     :else
     (let [id (or id (str (random-uuid)))
           t (now)
-          reply (store/tx! store module
-                           [["INSERT INTO jobs (id, module, kind, status, progress, input, created_at, updated_at) VALUES (?, ?, ?, 'queued', 0, ?, ?, ?)"
-                             id (name module) kind (edn-str input) t t]])]
+          reply (try (store/tx! store module
+                               [["INSERT INTO jobs (id, module, kind, status, progress, input, created_at, updated_at) VALUES (?, ?, ?, 'queued', 0, ?, ?, ?)"
+                                 id (name module) kind (edn-str input) t t]])
+                     (catch clojure.lang.ExceptionInfo e
+                       (if (= :invalid-job (:type (ex-data e))) {:ok false :error (ex-data e)} (throw e))))]
       (if (:ok reply)
         {:ok true :result (publish! bus :job/created (get-job store id))}
         reply))))
