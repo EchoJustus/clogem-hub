@@ -44,6 +44,10 @@
 
 (declare publish!)
 
+(defn- await-thread [ch timeout-ms]
+  (let [[_ port] (async/alts!! [ch (async/timeout timeout-ms)])]
+    (= port ch)))
+
 (defn- bump! [bus k] (swap! (:state bus) update-in [:stats k] inc))
 
 (defn- error-event [payload]
@@ -174,7 +178,9 @@
 
 (defn register-owner!
   "Make `handler` (fn [request] reply-map) the single owner of `command`.
-   Throws when the command already has an owner. Returns an unregister fn."
+   Throws when the command already has an owner. Returns an unregister fn
+   that closes the queue, waits (bounded, default 30 s) for the owner
+   thread to answer what is already queued, and returns true when it did."
   ([bus command handler] (register-owner! bus command handler {}))
   ([bus command handler opts]
    (when-not (keyword? command)
@@ -186,11 +192,15 @@
      (when-not (identical? owner (get-in claimed [:owners command]))
        (async/close! ch)
        (throw (ex-info (str "command already has an owner: " command) {:type :owner-exists :command command})))
-     (fn unregister []
-       (when (identical? owner (get-in @(:state bus) [:owners command]))
-         (swap! (:state bus) update :owners dissoc command)
-         (async/close! ch)
-         true)))))
+     (fn unregister
+       ([] (unregister 30000))
+       ([drain-timeout-ms]
+        ;; closing the channel lets the owner thread finish the queued
+        ;; requests before it exits: unregistering drains
+        (when (identical? owner (get-in @(:state bus) [:owners command]))
+          (swap! (:state bus) update :owners dissoc command)
+          (async/close! ch)
+          (await-thread (:thread owner) drain-timeout-ms)))))))
 
 (defn owners
   "The command keywords that currently have an owner, sorted."
@@ -230,10 +240,6 @@
            :subscribers (count (:subscribers s))
            :owners (count (:owners s))
            :open? (boolean (:open? s)))))
-
-(defn- await-thread [ch timeout-ms]
-  (let [[_ port] (async/alts!! [ch (async/timeout timeout-ms)])]
-    (= port ch)))
 
 (defn stop!
   "Stop accepting events, let the dispatcher drain its inbox, close every
