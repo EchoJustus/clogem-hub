@@ -13,13 +13,12 @@
    9p/v9fs/drvfs filesystem), creates the directory, sets WAL once, creates
    schema_migrations, starts the writer as owner of :db/tx on the bus and
    applies the hub's own migrations (the jobs table). Modules get tx!,
-   query and migrate!; close! drains the writer and checkpoints the WAL."
+   query and migrate!; close! drains the writer."
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
             [clojure.string :as str]
             [clogem.hub.db.migrate :as migrate]
             [clogem.hub.db.reader :as reader]
-            [clogem.hub.db.sqlite :as sqlite]
             [clogem.hub.db.writer :as writer]
             [clogem.hub.log :as log]))
 
@@ -99,10 +98,11 @@
   {:path (:path store) :fstype (:fstype store) :writer (writer/stats (:writer store))})
 
 (defn close!
-  "Drain the writer, then checkpoint and truncate the WAL."
+  "Drain the writer. No explicit checkpoint: the pod opens a connection per
+   call, and SQLite checkpoints and removes the WAL when the last connection
+   closes, so every call already leaves the file checkpointed; an explicit
+   one would race Babashka's own pod shutdown hook during daemon shutdown."
   [{:keys [writer path]}]
   (writer/stop! writer)
-  (try (sqlite/execute! path "PRAGMA wal_checkpoint(TRUNCATE)")
-       (catch Exception e (log/warn {:msg "wal checkpoint failed" :error (ex-message e)})))
   (log/info {:msg "database closed" :path path})
   nil)

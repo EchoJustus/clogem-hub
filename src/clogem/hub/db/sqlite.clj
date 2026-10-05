@@ -44,13 +44,22 @@
 (defonce ^:private gate (Object.))
 (defonce ^:private restart-lock (Object.))
 
-(defn- load! [] (pods/load-pod pod-name pod-version))
+(defonce ^:private fns (atom {}))
+
+(defn- load!
+  "Load the pod and capture its functions. Captured, not resolved per call:
+   resolution depends on the calling thread's namespace binding (shutdown
+   hooks have none), and a reloaded pod re-binds its vars, so this runs
+   again after every restart."
+  []
+  (pods/load-pod pod-name pod-version)
+  (reset! fns {'pod.babashka.go-sqlite3/execute! @(requiring-resolve 'pod.babashka.go-sqlite3/execute!)
+               'pod.babashka.go-sqlite3/query @(requiring-resolve 'pod.babashka.go-sqlite3/query)}))
 
 (load!)
 
 (defn- pod-fn [sym]
-  ;; resolved at call time: a reloaded pod re-binds its vars
-  (or (some-> (resolve sym) deref)
+  (or (get @fns sym)
       (throw (ex-info "sqlite pod function not loaded" {:type :pod-missing :fn sym}))))
 
 (defn stats [] @state)
