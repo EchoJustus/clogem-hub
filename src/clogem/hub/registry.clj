@@ -120,11 +120,18 @@
    whether the module is :ready, :degraded or :unavailable (see :reason)."
   [reg manifest]
   (let [id (:module/id manifest)]
-    (if-not (keyword? id)
+    (cond
+      (= :hub id)
+      ;; the hub's own identity (migrations, jobs ownership) is never a module's
+      (unavailable id manifest {:type :reserved-id :problems ["module id :hub is reserved for the hub"]})
+
+      (not (keyword? id))
       ;; a manifest without a usable id cannot be stored under a key; report it
       ;; without touching the registry so every projection keeps working
       (unavailable id manifest {:type :invalid-manifest
                                 :problems (:problems (manifest/check manifest))})
+
+      :else
       (let [previous (get-in @reg [:modules id])
             ;; only serving modules own names; an unavailable entry exposes nothing
             others (->> (vals (dissoc (:modules @reg) id)) (filter serving?) (map :manifest))

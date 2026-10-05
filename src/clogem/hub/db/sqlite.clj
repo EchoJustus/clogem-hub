@@ -26,8 +26,9 @@
    Hence this gateway: SQL is validated (never blank), every call is
    serialized through one lock, runs under a watchdog, and a pod that hangs
    or dies is replaced (its process destroyed, the pod loaded again) so the
-   daemon survives. Stats count calls, SQLITE_BUSY errors, timeouts,
-   crashes and restarts."
+   daemon survives; `close!` ends that at shutdown, so no pod is ever
+   spawned while the JVM exits. Stats count calls, SQLITE_BUSY errors,
+   timeouts, crashes and restarts."
   (:require [babashka.pods :as pods]
             [clojure.string :as str]
             [clogem.hub.log :as log]))
@@ -39,7 +40,7 @@
 (def default-call-timeout-ms 30000)
 
 (defonce ^:private state
-  (atom {:generation 0 :calls 0 :busy 0 :timeouts 0 :crashes 0 :restarts 0}))
+  (atom {:generation 0 :calls 0 :busy 0 :timeouts 0 :crashes 0 :restarts 0 :closed? false}))
 
 (defonce ^:private gate (Object.))
 (defonce ^:private restart-lock (Object.))
@@ -94,17 +95,38 @@
                  (let [cmd (-> h .info .command (.orElse ""))]
                    (str/includes? cmd pod-executable))))))
 
+(defn closed? [] (boolean (:closed? @state)))
+
+(defn close!
+  "Refuse further calls and restarts: the daemon is shutting down and
+   Babashka's own shutdown hook will destroy the pod process."
+  []
+  (swap! state assoc :closed? true)
+  nil)
+
+(defn- closed-error [op]
+  (ex-info "sqlite gateway is closed" {:type :pod-closed :op op}))
+
 (defn- restart!
   "Replace the pod process unless another thread already did so for this
-   generation. Returns the new generation."
+   generation or the gateway is closed. Returns the new generation."
   [generation reason]
   (locking restart-lock
-    (if (= generation (:generation @state))
+    (cond
+      (closed?) (:generation @state)
+
+      (= generation (:generation @state))
       (do (log/warn {:msg "restarting the sqlite pod" :reason reason :generation generation})
           (doseq [^java.lang.ProcessHandle p (pod-processes)] (.destroyForcibly p))
-          (load!)
+          (try (load!)
+               (catch IllegalStateException e
+                 ;; "Shutdown in progress": the JVM is exiting, never spawn a pod now
+                 (close!)
+                 (throw (ex-info "sqlite pod cannot restart during shutdown"
+                                 {:type :pod-closed :reason reason :message (ex-message e)} e))))
           (:generation (swap! state (fn [s] (-> s (update :generation inc) (update :restarts inc))))))
-      (:generation @state))))
+
+      :else (:generation @state))))
 
 (defn- crash? [^Throwable t]
   (let [m (or (ex-message t) "")]
@@ -128,10 +150,14 @@
   "Run `(f db sql)` serialized, under a watchdog of `timeout-ms`."
   [op fsym db sql {:keys [timeout-ms] :or {timeout-ms default-call-timeout-ms}}]
   (validate-sql! sql)
-  (let [f (pod-fn fsym)
-        generation (:generation @state)]
-    (swap! state update :calls inc)
-    (locking gate
+  (when (closed?) (throw (closed-error op)))
+  (swap! state update :calls inc)
+  (locking gate
+    ;; function and generation are read inside the gate: a restart performed
+    ;; by the previous holder must be seen by the next call, not retried
+    (let [f (pod-fn fsym)
+          generation (:generation @state)]
+      (when (closed?) (throw (closed-error op)))
       (let [fut (future (f db sql))
             r (try (deref fut timeout-ms ::timeout)
                    (catch java.util.concurrent.ExecutionException e (.getCause e)))]
@@ -163,8 +189,20 @@
   ([db sql] (execute! db sql {}))
   ([db sql opts] (call! :execute 'pod.babashka.go-sqlite3/execute! db sql opts)))
 
+(defn- trim-tail
+  "`sql` without trailing whitespace and semicolons: a query whose last
+   statement is empty hangs the pod."
+  [sql]
+  (let [text (sql-text sql)
+        trimmed (when (string? text) (str/replace text #"(?s)[\s;]+\z" ""))]
+    (cond
+      (not (string? text)) sql
+      (vector? sql) (assoc sql 0 trimmed)
+      :else trimmed)))
+
 (defn query
   "Run `sql` on `db` and return its rows as maps with keyword keys. Of a
-   multi-statement string only the last statement is stepped."
+   multi-statement string only the last statement is stepped; trailing
+   semicolons are removed first."
   ([db sql] (query db sql {}))
-  ([db sql opts] (call! :query 'pod.babashka.go-sqlite3/query db sql opts)))
+  ([db sql opts] (call! :query 'pod.babashka.go-sqlite3/query db (trim-tail sql) opts)))

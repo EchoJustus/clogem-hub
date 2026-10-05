@@ -19,9 +19,12 @@
 
    with the parameters concatenated in order. A failing statement rolls
    the whole transaction back (the pod closes its connection). Statements
-   may not carry transaction control, pragmas or ATTACH, and hold one
-   statement each; migration transactions (:migration? true, hub use)
-   relax the one-statement rule because migration files hold several.
+   may not carry transaction control, pragmas, EXPLAIN or ATTACH, hold one
+   statement each, close their comments and literals, and carry exactly as
+   many parameters as `?` placeholders (parameters are bound across the
+   batch in order, so a mismatch would shift every later statement);
+   migration transactions (:migration? true, hub use) relax the
+   one-statement rule because migration files hold several.
 
    Replies: {:ok true :result {:rows-affected n :last-inserted-id id
    :statements n}} or {:ok false :error {:type :invalid-tx|:sql-error|
@@ -54,7 +57,9 @@
         params (into [] (mapcat sqlite/sql-params) statements)]
     (into [(str "PRAGMA busy_timeout=" (long busy-timeout-ms) "; PRAGMA foreign_keys=ON;\n"
                 "BEGIN IMMEDIATE;\n"
-                (str/join ";\n" texts) ";\n"
+                ;; each ';' on its own line: a trailing line comment in a
+                ;; statement cannot swallow the separator or COMMIT
+                (str/join "\n;\n" texts) "\n;\n"
                 "COMMIT;")]
           params)))
 
@@ -67,7 +72,7 @@
         (let [r (sqlite/execute! db (compose tx busy-timeout-ms) {:timeout-ms call-timeout-ms})]
           (swap! stats update :committed inc)
           {:ok true :result (assoc r :statements (count statements))})
-        (catch clojure.lang.ExceptionInfo e
+        (catch Exception e
           (swap! stats update :failed inc)
           (log/warn {:msg "transaction failed" :module module :type (:type (ex-data e)) :error (ex-message e)})
           {:ok false :error {:type (or (:type (ex-data e)) :sql-error) :message (ex-message e)}})))))

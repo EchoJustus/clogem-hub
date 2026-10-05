@@ -122,6 +122,9 @@
 (deftest invalid-ids-never-poison-the-registry
   (let [reg (fresh-registry (atom []))]
     (registry/register! reg system-manifest)
+    (let [e (registry/register! reg (assoc echo-manifest :module/id :hub :module/entry 'clogem.module.echo.core/module))]
+      (is (= :unavailable (:status e)))
+      (is (= :reserved-id (get-in e [:reason :type])) "the hub's own id is never a module's"))
     (doseq [bad [(dissoc echo-manifest :module/id) (assoc echo-manifest :module/id "echo")]]
       (let [e (registry/register! reg bad)]
         (is (= :unavailable (:status e)))

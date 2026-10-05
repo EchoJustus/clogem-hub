@@ -86,8 +86,13 @@
   (-subscribe! [_ ctx event-type handler]
     (check-subscribe! ctx event-type)
     (bus/subscribe! bus event-type handler {:id [(:module/id ctx) event-type (random-uuid)]}))
-  (-request! [_ _ctx command]
-    (bus/request! bus command {:timeout-ms (get-in config [:bus :request-timeout-ms])}))
+  (-request! [_ ctx command]
+    (let [command (if (= :db/tx (:command command))
+                    ;; a raw :db/tx request is the same door as submit-tx!: it
+                    ;; runs as the calling module, never as another or as hub
+                    (-> command (assoc :module (:module/id ctx)) (dissoc :migration?))
+                    command)]
+      (bus/request! bus command {:timeout-ms (get-in config [:bus :request-timeout-ms])})))
   (-submit-tx! [_ ctx tx]
     (store/tx! (store-of store) (:module/id ctx) (statements-of tx)))
   (-query [_ _ctx q]

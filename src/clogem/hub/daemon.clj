@@ -21,6 +21,7 @@
             [org.httpkit.server :as hk]
             [clogem.hub.bus :as bus]
             [clogem.hub.config :as config]
+            [clogem.hub.db.sqlite :as sqlite]
             [clogem.hub.db.store :as store]
             [clogem.hub.log :as log]
             [clogem.hub.mcp.http :as http]
@@ -134,9 +135,36 @@
   (log/info {:msg "daemon stopped"})
   nil)
 
+(defn- stop-once! [system stopped?]
+  (when (compare-and-set! stopped? false true)
+    (stop! system)))
+
+(defn install-signal-handlers!
+  "Stop `system` on SIGTERM or SIGINT and then exit. The stop runs from the
+   signal handler, before the JVM's shutdown hooks: Babashka registers one
+   per loaded pod that destroys the pod process, so a stop started from a
+   shutdown hook would race it and lose the queued transactions. The hook
+   installed here is only a fallback for exits that bypass the signals; it
+   closes the pod gateway first so nothing tries to respawn a pod while the
+   JVM exits. Returns the atom that records whether the stop ran."
+  [system]
+  (let [stopped? (atom false)
+        handler (reify sun.misc.SignalHandler
+                  (handle [_ sig]
+                    (log/info {:msg "signal received" :signal (.getName ^sun.misc.Signal sig)})
+                    (stop-once! system stopped?)
+                    (System/exit 0)))]
+    (doseq [s ["TERM" "INT"]]
+      (try (sun.misc.Signal/handle (sun.misc.Signal. s) handler)
+           (catch Exception e
+             (log/warn {:msg "signal handler not installed" :signal s :error (ex-message e)}))))
+    (.addShutdownHook (Runtime/getRuntime)
+                      (Thread. (fn [] (when-not @stopped? (sqlite/close!)) (stop-once! system stopped?))))
+    stopped?))
+
 (defn -main
   "bb dev: run in the foreground with an nREPL until interrupted."
   [& _args]
   (let [system (start! {:nrepl? true})]
-    (.addShutdownHook (Runtime/getRuntime) (Thread. (fn [] (stop! system))))
+    (install-signal-handlers! system)
     @(promise)))

@@ -50,6 +50,8 @@
 
 (defn- bump! [bus k] (swap! (:state bus) update-in [:stats k] inc))
 
+(defn- subscribed? [bus id] (contains? (:subscribers @(:state bus)) id))
+
 (defn- error-event [payload]
   (event/event :hub :bus/error payload))
 
@@ -73,10 +75,11 @@
             :when ch]
       (if (async/offer! ch e)
         (bump! bus :delivered)
-        (do (bump! bus :dropped)
-            (report-error! bus {:reason :subscriber-overflow :subscriber id
-                                :event/type etype :event/id (:event/id e)}
-                           e false))))))
+        (when (subscribed? bus id) ; an unsubscribe racing us is not an overflow
+          (bump! bus :dropped)
+          (report-error! bus {:reason :subscriber-overflow :subscriber id
+                              :event/type etype :event/id (:event/id e)}
+                         e false))))))
 
 (defn- start-dispatcher! [bus]
   (async/thread
@@ -115,8 +118,12 @@
       (do (bump! bus :dropped)
           (log/warn {:msg "publish on a stopped bus" :event/type (:event/type e)}))
       (let [t (async/timeout (:publish-timeout-ms opts))
-            [v port] (async/alts!! [[in e] t])]
+            [v port] (try (async/alts!! [[in e] t])
+                          ;; core.async allows 1,024 pending puts per channel
+                          (catch AssertionError _ [::overloaded nil]))]
         (cond
+          (= v ::overloaded) (do (bump! bus :dropped)
+                                 (log/warn {:msg "bus inbox overloaded, event dropped" :event/type (:event/type e) :event/id (:event/id e)}))
           (= port t) (do (bump! bus :dropped)
                          (log/warn {:msg "bus inbox full, event dropped" :event/type (:event/type e) :event/id (:event/id e)}))
           (false? v) (do (bump! bus :dropped)
@@ -128,14 +135,20 @@
   (async/thread
     (loop []
       (when-some [e (async/<!! ch)]
-        (try (handler e)
-             (catch Throwable t
-               (report-error! bus {:reason :handler-failed :subscriber id
-                                   :event/type (:event/type e) :event/id (:event/id e)
-                                   :message (ex-message t)}
-                              e true)))
+        ;; events still buffered after unsubscribe are dropped, not handled
+        (when (subscribed? bus id)
+          (try (handler e)
+               (catch Throwable t
+                 (report-error! bus {:reason :handler-failed :subscriber id
+                                     :event/type (:event/type e) :event/id (:event/id e)
+                                     :message (ex-message t)}
+                                e true))))
         (recur)))
     :stopped))
+
+(defn- check-open! [bus what]
+  (when-not (open? bus)
+    (throw (ex-info (str what " on a stopped bus") {:type :bus-closed}))))
 
 (defn subscribe!
   "Call `(handler event)` on a dedicated thread for every event of
@@ -147,6 +160,7 @@
      (throw (ex-info "event type must be a qualified keyword" {:type :invalid-event-type :event/type event-type})))
    (when-not (fn? handler)
      (throw (ex-info "handler must be a function" {:type :invalid-handler})))
+   (check-open! bus "subscribe!")
    (let [id (or (:id opts) (random-uuid))
          ch (async/chan (or (:buffer opts) (get-in bus [:opts :subscriber-buffer])))
          sub {:id id :event/type event-type :ch ch :handler handler}
@@ -185,6 +199,7 @@
   ([bus command handler opts]
    (when-not (keyword? command)
      (throw (ex-info "command must be a keyword" {:type :invalid-command :command command})))
+   (check-open! bus "register-owner!")
    (let [ch (async/chan (or (:buffer opts) (get-in bus [:opts :owner-buffer])))
          owner {:ch ch :handler handler}
          owner (assoc owner :thread (start-owner! bus command owner))
@@ -212,15 +227,18 @@
    the reply map. Without an owner: {:ok false :error {:type :unknown-command}}.
    The whole exchange (waiting for queue room, then for the reply) shares
    one budget, :timeout-ms (default :request-timeout-ms); on expiry the
-   reply is {:ok false :error {:type :timeout :phase :enqueue|:reply}}."
+   reply is {:ok false :error {:type :timeout :phase :enqueue|:reply}}.
+   More than 1,024 callers waiting for queue room get {:type :overloaded}."
   ([bus request] (request! bus request {}))
   ([bus {:keys [command] :as request} {:keys [timeout-ms]}]
    (bump! bus :requests)
    (if-let [{:keys [ch]} (get-in @(:state bus) [:owners command])]
      (let [reply (async/promise-chan)
            t (async/timeout (or timeout-ms (get-in bus [:opts :request-timeout-ms])))
-           [v port] (async/alts!! [[ch {:request request :reply reply}] t])]
+           [v port] (try (async/alts!! [[ch {:request request :reply reply}] t])
+                         (catch AssertionError _ [::overloaded nil]))]
        (cond
+         (= v ::overloaded) {:ok false :error {:type :overloaded :command command}}
          (= port t) (do (bump! bus :timeouts) {:ok false :error {:type :timeout :command command :phase :enqueue}})
          (false? v) {:ok false :error {:type :unknown-command :command command}}
          :else (let [[r port] (async/alts!! [reply t])]

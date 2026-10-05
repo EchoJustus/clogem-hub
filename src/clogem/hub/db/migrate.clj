@@ -71,12 +71,17 @@
 
 (defn load-migrations
   "[{:version n :name file :sql text} …] sorted by version, from the
-   classpath directory `resource`. Throws on duplicate versions."
+   classpath directory `resource`. Throws on duplicate versions and on
+   `.sql` files that do not follow the NNNN-slug.sql pattern."
   [resource]
-  (let [files (->> (fs/list-dir (resource-dir resource))
-                   (keep (fn [p]
-                           (when-let [[_ v] (re-matches file-re (fs/file-name p))]
-                             {:version (Long/parseLong v) :name (fs/file-name p) :sql (slurp (str p))})))
+  (let [sql-files (filter #(str/ends-with? (fs/file-name %) ".sql") (fs/list-dir (resource-dir resource)))
+        bad (remove #(re-matches file-re (fs/file-name %)) sql-files)
+        _ (when (seq bad)
+            (throw (ex-info (str "migration files must be named NNNN-slug.sql: " (str/join ", " (map fs/file-name bad)))
+                            {:type :migrations-badname :resource resource :files (mapv fs/file-name bad)})))
+        files (->> sql-files
+                   (map (fn [p] (let [[_ v] (re-matches file-re (fs/file-name p))]
+                                  {:version (Long/parseLong v) :name (fs/file-name p) :sql (slurp (str p))})))
                    (sort-by :version)
                    vec)
         dups (->> files (map :version) frequencies (filter (fn [[_ n]] (> n 1))) (map first))]
@@ -85,13 +90,30 @@
                       {:type :migrations-duplicate :resource resource :versions dups})))
     files))
 
-(def create-re
-  #"(?i)\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?(?:VIRTUAL\s+)?(?:UNIQUE\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`\[]?([A-Za-z_][A-Za-z0-9_]*)")
+(def ^:private ident
+  "An optionally quoted, optionally schema-qualified identifier; group 1 is
+   the bare name."
+  (str "[\"`\\[]?(?:(?:main|temp)[\"`\\]]?\\.[\"`\\[]?)?([A-Za-z_][A-Za-z0-9_]*)"))
 
-(defn created-names
-  "Names of the tables, indexes, triggers and views `sql` creates."
+(def object-res
+  "Where a migration names a database object it owns: what it creates,
+   alters, renames to or drops. Quoted and schema-qualified spellings are
+   reduced to the bare name."
+  [(re-pattern (str "(?i)\\bCREATE\\s+(?:TEMP(?:ORARY)?\\s+)?(?:VIRTUAL\\s+)?(?:UNIQUE\\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?" ident))
+   (re-pattern (str "(?i)\\bALTER\\s+TABLE\\s+" ident))
+   (re-pattern (str "(?i)\\bRENAME\\s+TO\\s+" ident))
+   (re-pattern (str "(?i)\\bDROP\\s+(?:TABLE|INDEX|TRIGGER|VIEW)\\s+(?:IF\\s+EXISTS\\s+)?" ident))])
+
+(defn object-names
+  "Names of the tables, indexes, triggers and views `sql` creates, alters,
+   renames to or drops (comments removed first)."
   [sql]
-  (mapv second (re-seq create-re sql)))
+  (let [code (sql/strip-comments sql)]
+    (vec (distinct (for [re object-res [_ n] (re-seq re code)] n)))))
+
+(def created-names
+  "Kept for callers that only ask about creations; same as object-names."
+  object-names)
 
 (defn table-prefix
   "The prefix a module's database objects carry: `<id>_`, dashes as underscores."
@@ -104,7 +126,7 @@
   (if (= :hub module)
     []
     (let [prefix (table-prefix module)]
-      (vec (for [n (created-names sql) :when (not (str/starts-with? n prefix))]
+      (vec (for [n (object-names sql) :when (not (str/starts-with? n prefix))]
              (str "object " n " must be prefixed " prefix))))))
 
 (defn applied-versions

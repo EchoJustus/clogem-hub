@@ -54,8 +54,9 @@
           (api/subscribe! ctx :registry/changed #(swap! seen conj %))
           (api/subscribe! ctx :job/progress #(swap! seen conj %))
           (registry/unregister! reg :system)
-          (is (wait-for #(= 1 (count @seen)) 2000))
-          (is (= {:change :unregistered :module :system} (:event/payload (first @seen)))))
+          (is (wait-for #(some (comp #{:unregistered} :change :event/payload) @seen) 2000))
+          (is (= {:change :unregistered :module :system}
+                 (:event/payload (first (filter (comp #{:unregistered} :change :event/payload) @seen))))))
         (testing "commands reach their owner"
           (is (= {:ok true :result {:status :ok :modules [{:id :echo :status :ready :reason nil}]}}
                  (api/request! ctx {:command :system/health}))))
@@ -71,10 +72,14 @@
                 id (:id result)]
             (is (= :queued (:status result)))
             (is (= :running (get-in (api/job! ctx :progress {:id id :progress 0.5}) [:result :status])))
-            (is (wait-for #(= 2 (count @seen)) 2000) "the module sees its own :job/progress event")
-            (is (= id (get-in (second @seen) [:event/payload :id])))
+            (is (wait-for #(some (comp #{:job/progress} :event/type) @seen) 2000) "the module sees its own :job/progress event")
+            (is (= id (get-in (first (filter (comp #{:job/progress} :event/type) @seen)) [:event/payload :id])))
             (is (= :done (get-in (api/job! ctx :complete {:id id :result :ok}) [:result :status])))
             (is (= [{:status "done"}] (api/query ctx ["SELECT status FROM jobs WHERE id = ?" id])))))
+        (testing "a raw :db/tx request runs as the caller, whatever it claims"
+          (let [r (api/request! ctx {:command :db/tx :module :hub :migration? true
+                                     :statements ["CREATE TABLE sneaky (id INTEGER PRIMARY KEY); SELECT 1"]})]
+            (is (= :invalid-tx (get-in r [:error :type])) "the :migration? flag was dropped, so two statements are refused")))
         (testing "config and log"
           (is (nil? (api/config ctx [:anything])))
           (is (nil? (api/log ctx :debug {:msg "fine"}))))))))

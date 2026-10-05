@@ -105,13 +105,26 @@
           (is (= ["statement 0 must be a string or [sql & params]"] (rejected [42])))
           (is (= ["statement 1 holds more than one statement; ';' may only end it"]
                  (rejected ["DELETE FROM echo_items WHERE k = 'zz'" "SELECT 1; PRAGMA journal_mode=DELETE"])))
+          (is (= ["statement 0 has 2 placeholder(s) but 1 parameter(s)"]
+                 (rejected [["INSERT INTO echo_items (k, v) VALUES (?, ?)" "only-one"]])))
+          (is (= ["statement 0 has 1 placeholder(s) but 2 parameter(s)"]
+                 (rejected [["INSERT INTO echo_items (k) VALUES (?)" "a" "surplus"]])))
+          (is (= ["statement 0 has an unterminated comment or string literal"]
+                 (rejected ["INSERT INTO echo_items (k) VALUES ('x') /* swallow the COMMIT"])))
+          (is (= ["statement 0 uses numbered parameters; use plain ? placeholders"]
+                 (rejected [["INSERT INTO echo_items (k) VALUES (?1)" "a"]])))
+          (is (= ["statement 0 may not start with EXPLAIN"] (rejected ["EXPLAIN PRAGMA ignore_check_constraints=ON"])))
           (is (= ["statement 0 may not start with PRAGMA"] (rejected ["PRAGMA foreign_keys=OFF"])))
           (is (= ["statement 0 may not start with BEGIN"] (rejected ["  -- sneaky\n BEGIN"])))
           (is (= ["statement 0 may not start with ATTACH"] (rejected ["/* c */ attach database 'x' as y"])))
           (is (= calls (:calls (sqlite/stats))) "no pod call was made")
-          (is (= 8 (:rejected (writer/stats (:writer s)))))))
+          (is (= 13 (:rejected (writer/stats (:writer s)))))))
+      (testing "comments and literals are understood"
+        (is (:ok (store/tx! s :echo [["INSERT INTO echo_items (k, v) VALUES (?, ?) -- trailing comment" "cmt" "a; b /* not a comment */ ?"]]))
+            "a trailing line comment and a ';' or '?' inside a literal are fine")
+        (is (= [{:v "a; b /* not a comment */ ?"}] (store/query s ["SELECT v FROM echo_items WHERE k = ?" "cmt"]))))
       (let [st (writer/stats (:writer s))]
-        (is (= 5 (:committed st)))
+        (is (= 6 (:committed st)))
         (is (= 2 (:failed st)))))))
 
 (deftest queries-are-single-read-only-statements
@@ -123,11 +136,16 @@
       (is (= [{:n 1}] (store/query s "WITH c AS (SELECT count(*) AS n FROM echo_q) SELECT n FROM c")))
       (is (= [{:column1 1}] (store/query s "VALUES (1)")))
       (is (seq (store/query s "EXPLAIN SELECT 1")))
+      (is (seq (store/query s "EXPLAIN QUERY PLAN SELECT * FROM echo_q")))
+      (is (= [{:v "x"}] (store/query s "SELECT v /* ; not a split */ FROM echo_q -- tail")))
       (let [invalid (fn [q] (let [e (try (store/query s q) (catch clojure.lang.ExceptionInfo e e))]
                               (is (= :invalid-query (:type (ex-data e))) (pr-str q))
                               (first (:problems (ex-data e)))))]
         (is (re-find #"must start with" (invalid "DELETE FROM echo_q")))
         (is (re-find #"must start with" (invalid "PRAGMA query_only=OFF")))
+        (is (re-find #"EXPLAIN may only precede" (invalid "EXPLAIN PRAGMA hard_heap_limit=1000")))
+        (is (re-find #"placeholder" (invalid ["SELECT ? AS a, ? AS b" 1])))
+        (is (re-find #"unterminated" (invalid "SELECT 'oops")))
         (is (re-find #"more than one statement" (invalid "SELECT 1; PRAGMA query_only=OFF; DELETE FROM echo_q")))
         (is (re-find #"is blank" (invalid "  ")))
         (is (re-find #"must be a string" (invalid [1 2]))))
@@ -192,7 +210,24 @@
           (is (= "my_mod_" (migrate/table-prefix :my-mod)))
           (is (= ["object y must be prefixed my_mod_"]
                  (migrate/prefix-problems :my-mod "CREATE TABLE my_mod_x (a); CREATE UNIQUE INDEX IF NOT EXISTS y ON my_mod_x (a)")))
-          (is (= [] (migrate/prefix-problems :hub "CREATE TABLE anything (a)"))))))))
+          (is (= [] (migrate/prefix-problems :hub "CREATE TABLE anything (a)"))))
+        (testing "renames, alters and drops are checked too, quoted and schema-qualified"
+          (is (= ["object notes must be prefixed echo_"]
+                 (migrate/prefix-problems :echo "ALTER TABLE echo_notes RENAME TO notes")))
+          (is (= ["object jobs must be prefixed echo_"] (migrate/prefix-problems :echo "DROP TABLE IF EXISTS main.\"jobs\"")))
+          (is (= ["object other_t must be prefixed echo_"] (migrate/prefix-problems :echo "ALTER TABLE [other_t] ADD COLUMN x")))
+          (is (= [] (migrate/prefix-problems :echo "-- CREATE TABLE commented (a)\nCREATE TEMP TABLE temp.echo_tmp AS SELECT 1")))
+          (is (= ["echo_notes" "echo_notes2"] (migrate/object-names "ALTER TABLE echo_notes RENAME TO echo_notes2"))))
+        (testing "a trigger body may hold several statements and END"
+          (write-migration! (str res "/trig/0004-trig.sql")
+                            "CREATE TABLE echo_log (id INTEGER PRIMARY KEY, body TEXT);\nCREATE TRIGGER echo_notes_log AFTER INSERT ON echo_notes BEGIN INSERT INTO echo_log (body) VALUES (new.body); UPDATE echo_log SET body = body WHERE id = 0; END;")
+          (is (= {:module :echo :applied [4] :current 4} (store/migrate! s :echo (str res "/trig"))))
+          (store/tx! s :echo [["INSERT INTO echo_notes (body) VALUES (?)" "fires"]])
+          (is (= [{:body "fires"}] (store/query s "SELECT body FROM echo_log")) "the trigger body ran"))
+        (testing "misnamed .sql files are an error, not silently skipped"
+          (write-migration! (str res "/named/0001-ok.sql") "SELECT 1")
+          (write-migration! (str res "/named/init.sql") "SELECT 1")
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"NNNN-slug" (store/migrate! s :echo (str res "/named")))))))))
 
 (deftest a-thousand-concurrent-transactions-land-exactly-once-without-busy
   (with-store
@@ -217,7 +252,7 @@
         db (str (fs/path dir "clogem.db"))
         err (fs/file (fs/path dir "child.err"))
         proc (p/process {:err err :dir (System/getProperty "user.dir")}
-                        "bb" "test/fixtures/db/long_tx_child.clj" db "6000000")
+                        "bb" "test/fixtures/db/long_tx_child.clj" db "30000000")
         ^java.lang.Process jproc (:proc proc)
         reader (io/reader (:out proc))
         ready (future (loop [] (when-let [line (.readLine ^java.io.BufferedReader reader)]

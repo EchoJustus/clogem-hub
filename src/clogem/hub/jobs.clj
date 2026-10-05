@@ -15,11 +15,12 @@
    payload (source :hub).
 
    Lifecycle: queued → running → done | failed | cancelled. :progress moves a
-   queued job to running and carries a fraction 0..1 plus a message; its
-   reply tells the module whether cancellation was requested, so a module
-   that reports progress also learns to stop. A finished job rejects every
-   further change with :job-finished. A module may only touch its own jobs;
-   the hub (module :hub) may touch any.
+   queued job to running and carries a fraction 0..1 plus a message. :cancel
+   finishes the job at once; the next :progress (or :complete/:fail) from the
+   module is answered {:type :job-finished :status :cancelled}, which is how
+   a running module learns to stop. A finished job rejects every further
+   change with :job-finished. A module may only touch its own jobs; the hub
+   (module :hub) may touch any.
 
    Ops: :create {:kind :input} · :progress {:id :progress :message} ·
    :complete {:id :result} · :fail {:id :error} · :cancel {:id} · :get {:id}.
@@ -126,7 +127,7 @@
 
 (defn progress!
   "Report progress (0..1) and an optional message; the job becomes running.
-   The reply's :cancel-requested? tells the module to stop."
+   On a cancelled job the reply is {:type :job-finished :status :cancelled}."
   [deps module {:keys [id progress message]}]
   (cond
     (not (and (number? progress) (<= 0 progress 1))) (invalid ":progress must be a number between 0 and 1")
@@ -142,8 +143,9 @@
   (change! deps module id "status = 'failed', error = ?, finished_at = ?" [(edn-str error) (now)] :job/failed))
 
 (defn cancel!
-  "Cancel an open job: it is finished at once and cancel_requested is set,
-   so a module still reporting progress is told to stop."
+  "Cancel an open job: it is finished at once (status cancelled,
+   cancel_requested set); the module's next report is refused with
+   :job-finished."
   [deps module {:keys [id]}]
   (change! deps module id "status = 'cancelled', cancel_requested = 1, finished_at = ?" [(now)] :job/cancelled))
 

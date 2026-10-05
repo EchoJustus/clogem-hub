@@ -32,11 +32,11 @@
                    (when (pos? (+ fail error)) (System/exit 1))))))}
 
   lint
-  {:doc "Fitness checks: headers, namespace ownership, module isolation, pods only in clogem.hub.db.*, no prints outside clogem.hub.log, manifests, home paths."
+  {:doc "Fitness checks: headers, namespace ownership, module isolation, the pod only in clogem.hub.db.sqlite, no prints outside clogem.hub.log, manifests, home paths."
    :requires ([clogem.sdk.lint :as lint])
    :task (when-not (lint/lint! {:root "." :license :epl-2.0
                                 :namespaces ["clogem.hub" "clogem.module.system" "clogem.module.media" "clogem.module.ui"]
-                                :pod-namespaces ["clogem.hub.db"]
+                                :pod-namespaces ["clogem.hub.db.sqlite"]
                                 :log-namespace "clogem.hub.log"
                                 :no-print-prefixes ["clogem.hub" "clogem.module"]})
            (System/exit 1))}
