@@ -32,12 +32,12 @@ rules run. The denylist is never copied into this repository.
 
 ```text
 LICENSE  README.md  CLAUDE.md  bb.edn  .gitignore
-src/clogem/hub/{registry,config,log,daemon,runtime}.clj   src/clogem/hub/mcp/{jsonrpc,methods,http,stdio}.clj
+src/clogem/hub/{registry,bus,config,log,daemon,runtime,jobs}.clj   src/clogem/hub/mcp/{jsonrpc,methods,http,stdio}.clj
+src/clogem/hub/db/{sqlite,sql,writer,reader,migrate,store}.clj      resources/clogem/hub/db/migrations/NNNN-slug.sql
 src/clogem/module/system/{core,tools}.clj                resources/clogem/module/system/manifest.edn
-test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)
+test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)   test/fixtures/db/ (kill-test child script)
 docs/adr/  docs/mcp-compliance.md  docs/deps.md
-planned: bin/clogem-open (S07), src/clogem/hub/{bus,uri}.clj and db/ (S02), media/ llm/ and
-         module/{media,ui} (S04), resources/…/migrations/ (S02), docs/roadmap.md
+planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, media/ llm/ and module/{media,ui} (S04), docs/roadmap.md
 ```
 
 ## Rules
@@ -49,9 +49,18 @@ planned: bin/clogem-open (S07), src/clogem/hub/{bus,uri}.clj and db/ (S02), medi
 - **Two channels (PD-2):** modules, built-in ones included, talk only through the bus and
   `clogem.api`. A module never requires `clogem.hub.*` or another module, never calls the MCP
   endpoint; no business logic in the MCP layer; the daemon is not an MCP client (v1).
-- **Single writer (PD-3):** only `clogem.hub.db.writer` runs SQL mutations, on one thread draining
-  a bounded queue; only `clogem.hub.db.*` loads the `org.babashka/go-sqlite3` pod. Reads go
-  through `clogem.api/query` with `PRAGMA query_only=ON`.
+- **Single writer (PD-3):** only `clogem.hub.db.writer` runs SQL mutations, as owner of the bus
+  command `:db/tx` on one thread draining a bounded queue, one pod call per transaction
+  (`PRAGMA busy_timeout; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE; …; COMMIT`). Only
+  `clogem.hub.db.sqlite` loads the `org.babashka/go-sqlite3` pod, serializes every call (the pod
+  deadlocks on concurrent calls), rejects blank SQL (it hangs the pod) and restarts a hung pod.
+  Reads go through `clogem.api/query`: one read-only statement under `PRAGMA query_only=ON`.
+  Migrations: `NNNN-slug.sql` files, `schema_migrations(module, version)`, module objects
+  prefixed `<id>_`, WAL set once. Jobs: the `jobs` table behind `clogem.api/job!`. ADR-0003.
+- **Bus (PD-2):** `clogem.hub.bus`: validated envelopes, one dispatcher thread, bounded per-subscriber
+  channels and threads (`async/thread`, never go blocks), command owners with reply channels and
+  timeouts, failures as `:bus/error`. Modules publish/subscribe only the event types their
+  manifest declares; payloads are validated against the declared schema.
 - **One daemon, many doors (PD-4):** every stdio entry point is a thin proxy to the running daemon.
   In stdio processes stdout carries protocol frames only; logs are one EDN map per line on
   stderr via `clogem.hub.log`. No `print`/`println`/`prn` elsewhere in daemon or stdio paths.
@@ -75,7 +84,7 @@ planned: bin/clogem-open (S07), src/clogem/hub/{bus,uri}.clj and db/ (S02), medi
   prompts, secrets, tokens, absolute personal paths, or session logs. `bb guard:public` enforces
   it; the denylist lives outside this repo.
 - **Dependencies (§2.5):** exact pins; prefer bb built-ins; allowlisted additions are
-  `metosin/malli` and the pod `org.babashka/go-sqlite3` (only from `clogem.hub.db.*`).
+  `metosin/malli` and the pod `org.babashka/go-sqlite3` 0.2.8 (only from `clogem.hub.db.sqlite`).
   Smoke-test and record new deps in `docs/deps.md`. `:min-bb-version` is the installed bb
   (1.13.225; floor 1.12.208, from which bb waits for non-daemon threads).
 - **Conventions (§2.7):** manifests are the source of truth for tools, resources, prompts, events,
@@ -87,4 +96,5 @@ planned: bin/clogem-open (S07), src/clogem/hub/{bus,uri}.clj and db/ (S02), medi
   code with its source). Dual-era: modern requests carry `params._meta`; `initialize`/`ping` are
   legacy. Every result has `resultType` and `_meta serverInfo`; lists carry `ttlMs`/`cacheScope`.
 - **ADRs:** `docs/adr/NNNN-slug.md`, public-safe: 0001 modular monolith and two channels, 0002
-  dual-era MCP, loopback-only and unauthenticated until S03. Session logs never live here.
+  dual-era MCP, loopback-only and unauthenticated until S03, 0003 single writer and pod
+  semantics. Session logs never live here.
