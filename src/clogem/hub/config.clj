@@ -16,9 +16,12 @@
 
    config.edn is read with clojure.edn (no eval). Environment overrides:
    CLOGEM_CONFIG_DIR, CLOGEM_PORT. The HTTP listener is validated to be a
-   loopback address (PD-9): anything else is rejected."
+   loopback address (PD-9): anything else is rejected. The database lives
+   at `:db :path` (default <data-dir>/clogem.db); the store refuses paths
+   on Windows mounts (PD-10)."
   (:require [babashka.fs :as fs]
-            [clojure.edn :as edn]))
+            [clojure.edn :as edn]
+            [clojure.string :as str]))
 
 (def hub-version "0.1.0")
 
@@ -28,6 +31,12 @@
           ;; Origins allowed on /mcp besides none. Loopback origins are
           ;; always accepted.
           :allowed-origins #{}}
+   :bus {:request-timeout-ms 5000}      ; budget of clogem.api/request!
+   :db {:path nil                       ; nil → <data-dir>/clogem.db
+        :busy-timeout-ms 5000           ; SQLite busy handler per transaction
+        :queue 256                      ; bounded writer queue
+        :call-timeout-ms 30000          ; watchdog per pod call
+        :tx-timeout-ms 60000}           ; wait for queue room plus reply
    :modules {}})
 
 (def loopback-hosts #{"127.0.0.1" "::1" "localhost"})
@@ -56,6 +65,11 @@
     (str (fs/path base "clogem"))))
 
 (defn config-file [] (str (fs/path (config-dir) "config.edn")))
+
+(defn db-path
+  "The database file: `:db :path` or <data-dir>/clogem.db."
+  [config]
+  (or (get-in config [:db :path]) (str (fs/path (data-dir) "clogem.db"))))
 
 (defn read-edn-file
   "The EDN map in `path`, or nil when the file is absent or not a map."
@@ -87,6 +101,15 @@
                       {:allowed loopback-hosts})))
     (when-not (and (integer? port) (<= 0 port 65535))
       (throw (ex-info (str "http port must be 0..65535, got " (pr-str port)) {})))
+    (let [path (get-in config [:db :path])]
+      (when-not (or (nil? path) (and (string? path) (not (str/blank? path))))
+        (throw (ex-info (str "db path must be a non-blank string or nil, got " (pr-str path)) {}))))
+    (doseq [[k v] (dissoc (:db config) :path)]
+      (when-not (and (integer? v) (pos? v))
+        (throw (ex-info (str "db " (name k) " must be a positive integer, got " (pr-str v)) {}))))
+    (doseq [[k v] (:bus config)]
+      (when-not (and (integer? v) (pos? v))
+        (throw (ex-info (str "bus " (name k) " must be a positive integer, got " (pr-str v)) {}))))
     config))
 
 (defn load-config

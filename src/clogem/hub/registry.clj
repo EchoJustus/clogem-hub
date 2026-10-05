@@ -13,22 +13,27 @@
    uniqueness → resolve :module/entry and every handler symbol → start →
    status :ready, :degraded (started, health not ok) or :unavailable (with a
    reason). Ordering is deterministic: module id, then tool name.
-   Projections: tools-for <profile>, resource-index. A :registry/changed
-   callback seam notifies listeners; the bus replaces it in S02."
-  (:require [clogem.sdk.manifest :as manifest]
+   Projections: tools-for <profile>, resource-index. Every change is
+   published on the bus as a :registry/changed event (source :hub)."
+  (:require [clogem.sdk.event :as event]
+            [clogem.sdk.manifest :as manifest]
+            [clogem.hub.bus :as bus]
             [clogem.hub.log :as log]))
 
 (defn new-registry
   "Create a registry. `runtime` is the clogem.api/Runtime handed to modules
-   (as :clogem/runtime in their ctx); `on-change` is a (fn [event]) seam."
-  [{:keys [runtime on-change]}]
-  (atom {:modules {} :runtime runtime :on-change on-change}))
+   (as :clogem/runtime in their ctx); `bus` receives :registry/changed events;
+   `before-start` is an optional (fn [manifest]) run after the manifest and
+   its handlers are resolved and before the module starts (the daemon runs
+   the module's migrations there); when it throws, the module is unavailable."
+  [{:keys [runtime bus before-start]}]
+  (atom {:modules {} :runtime runtime :bus bus :before-start before-start}))
 
-(defn- notify! [reg event]
-  (when-let [f (:on-change @reg)]
-    (try (f (assoc event :event/type :registry/changed))
+(defn- notify! [reg payload]
+  (when-let [b (:bus @reg)]
+    (try (bus/publish! b (event/event :hub :registry/changed payload))
          (catch Exception e
-           (log/warn {:msg "registry listener failed" :error (ex-message e)})))))
+           (log/warn {:msg "registry change not published" :error (ex-message e)})))))
 
 (defn module-ctx
   "The ctx a module receives: runtime, its id and its manifest."
@@ -89,6 +94,10 @@
 
           :else
           (try
+            (when-let [prepare (:before-start @reg)]
+              (try (prepare manifest)
+                   (catch Exception e
+                     (throw (ex-info (ex-message e) {:type :before-start-failed :cause (ex-data e)} e)))))
             (let [ctx (module-ctx reg id manifest)
                   state ((:start entry) ctx)
                   health (when-let [h (:health entry)]
@@ -100,7 +109,9 @@
                :status (if ok :ready :degraded)
                :reason (when-not ok {:type :health :health health})})
             (catch Exception e
-              (unavailable id manifest {:type :start-failed :message (ex-message e)}))))))))
+              (unavailable id manifest (if (= :before-start-failed (:type (ex-data e)))
+                                         {:type :before-start-failed :message (ex-message e)}
+                                         {:type :start-failed :message (ex-message e)})))))))))
 
 (defn- serving? [entry] (contains? #{:ready :degraded} (:status entry)))
 

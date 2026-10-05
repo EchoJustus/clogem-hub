@@ -9,6 +9,7 @@
 (ns clogem.hub.registry-test
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [clogem.hub.bus :as bus]
             [clogem.hub.config :as config]
             [clogem.hub.log :as log]
             [clogem.hub.registry :as registry]
@@ -24,13 +25,24 @@
 (def system-manifest (resource-manifest "clogem/module/system/manifest.edn"))
 (def echo-manifest (resource-manifest "clogem/module/echo/manifest.edn"))
 
+(def ^:dynamic *bus* nil)
+
+(use-fixtures :each (fn [f] (binding [*bus* (bus/new-bus)] (try (f) (finally (bus/stop! *bus*))))))
+
+(defn- wait-for [pred ms]
+  (let [deadline (+ (System/currentTimeMillis) ms)]
+    (loop [] (or (pred) (when (< (System/currentTimeMillis) deadline) (Thread/sleep 5) (recur))))))
+
 (defn- fresh-registry
-  "A registry wired to the S01 runtime, with change events recorded in `events`."
-  [events]
-  (let [rt (runtime/new-runtime config/defaults)
-        reg (registry/new-registry {:runtime rt :on-change #(swap! events conj %)})]
-    (runtime/attach-registry! rt reg)
-    reg))
+  "A registry on a runtime without a database, with :registry/changed events
+   recorded in `events` through the bus."
+  ([events] (fresh-registry events {}))
+  ([events opts]
+   (let [rt (runtime/new-runtime {:config config/defaults :bus *bus*})
+         reg (registry/new-registry (merge {:runtime rt :bus *bus*} opts))]
+     (bus/subscribe! *bus* :registry/changed #(swap! events conj %))
+     (runtime/attach-registry! rt reg)
+     reg)))
 
 (deftest built-in-manifests-are-valid
   (is (= {:ok? true :problems []} (manifest/check system-manifest)))
@@ -65,10 +77,11 @@
         (is (= {:text "HI"} (handler ctx {:text "hi" :upcase true})))))
     (testing "resource index is empty but well-formed"
       (is (= {:resources {} :templates []} (registry/resource-index reg :admin))))
-    (testing "change events were emitted in order"
+    (testing "change events were published on the bus in order"
+      (is (wait-for #(= 2 (count @events)) 2000))
       (is (= [[:registered :system :ready] [:registered :echo :ready]]
-             (map (juxt :change :module :status) @events)))
-      (is (every? #(= :registry/changed (:event/type %)) @events)))
+             (map (comp (juxt :change :module :status) :event/payload) @events)))
+      (is (every? #(= [:registry/changed :hub] ((juxt :event/type :event/source) %)) @events)))
     (testing "unregister stops and removes"
       (is (true? (registry/unregister! reg :echo)))
       (is (false? (registry/unregister! reg :echo)))
@@ -151,14 +164,34 @@
     (testing "re-registering the same module id replaces it without a conflict"
       (is (= :ready (:status (registry/register! reg echo-manifest)))))))
 
-(deftest unsupported-runtime-operations-fail-clearly
+(deftest before-start-failures-make-a-module-unavailable
+  (let [calls (atom [])
+        reg (fresh-registry (atom []) {:before-start (fn [m] (swap! calls conj (:module/id m))
+                                                      (when (= :echo (:module/id m)) (throw (ex-info "migration broke" {:type :migration-failed}))))})]
+    (is (= :ready (:status (registry/register! reg system-manifest))))
+    (let [e (registry/register! reg echo-manifest)]
+      (is (= :unavailable (:status e)))
+      (is (= {:type :before-start-failed :message "migration broke"} (:reason e))))
+    (is (= [:system :echo] @calls) "the hook runs once per registration, before start")
+    (is (= ["system_health" "system_list_modules"] (map (comp :name :tool) (registry/tools-for reg :admin))))))
+
+(deftest runtime-operations-without-a-database-fail-clearly
   (let [reg (fresh-registry (atom []))
         ctx (registry/module-ctx reg :echo echo-manifest)]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not available until S02"
-                          (clogem.api/query ctx {})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"database is not available"
+                          (clogem.api/query ctx "SELECT 1")))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"database is not available"
+                          (clogem.api/job! ctx :create {:kind "x"})))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not available until S04"
                           (clogem.api/run-process! ctx ["true"])))
     (is (= {:ok false :error {:type :unknown-command :command :nope}}
            (clogem.api/request! ctx {:command :nope})))
     (is (= :echo/said (:event/type (clogem.api/publish! ctx :echo/said {:text "x"}))))
-    (is (fn? (clogem.api/subscribe! ctx :echo/said identity)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not declare :echo/other"
+                          (clogem.api/publish! ctx :echo/other {})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not match its declared schema"
+                          (clogem.api/publish! ctx :echo/said {:text 1})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"does not declare :echo/said in :bus/subscribes"
+                          (clogem.api/subscribe! ctx :echo/said identity)))
+    (is (fn? (clogem.api/subscribe! (registry/module-ctx reg :echo (assoc-in echo-manifest [:bus :subscribes] #{:echo/said}))
+                                    :echo/said identity)))))

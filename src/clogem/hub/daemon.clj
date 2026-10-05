@@ -7,16 +7,21 @@
 ;; SPDX-License-Identifier: EPL-2.0
 
 (ns clogem.hub.daemon
-  "The daemon: one per OS user. Builds the runtime and the registry, loads the
-   built-in modules, serves MCP over Streamable HTTP on 127.0.0.1 and, in
-   development, an nREPL on a random loopback port. Writes daemon.edn (pid,
-   port, version, nrepl port) under the runtime directory so other doors can
-   find it. The single-instance lock and systemd unit arrive in S03."
+  "The daemon: one per OS user. Starts the bus, opens the database (single
+   writer, hub schema), builds the runtime and the registry, loads the
+   built-in modules (running their migrations first), serves MCP over
+   Streamable HTTP on 127.0.0.1 and, in development, an nREPL on a random
+   loopback port. Writes daemon.edn (pid, port, version, nrepl port, db)
+   under the runtime directory so other doors can find it. Stopping drains
+   the writer before the bus goes down. The single-instance lock and the
+   systemd unit arrive in S03."
   (:require [babashka.fs :as fs]
             [babashka.nrepl.server :as nrepl]
             [clojure.java.io :as io]
             [org.httpkit.server :as hk]
+            [clogem.hub.bus :as bus]
             [clogem.hub.config :as config]
+            [clogem.hub.db.store :as store]
             [clogem.hub.log :as log]
             [clogem.hub.mcp.http :as http]
             [clogem.hub.registry :as registry]
@@ -62,6 +67,12 @@
 
 (declare stop!)
 
+(defn migrate-module!
+  "Run a module's migrations (manifest `:db :migrations`) before it starts."
+  [st manifest]
+  (when-let [resource (get-in manifest [:db :migrations])]
+    (store/migrate! st (:module/id manifest) resource)))
+
 (defn start!
   "Start the daemon. Options: :config (default load-config), :nrepl? (default
    false), :runtime-dir (default config/runtime-dir). Returns the system map
@@ -71,14 +82,18 @@
         dir (or runtime-dir (config/runtime-dir))
         ;; prove the runtime directory is writable before anything is started
         _ (fs/create-dirs dir)
-        rt (runtime/new-runtime config)
-        reg (registry/new-registry {:runtime rt
-                                    :on-change (fn [e] (log/debug {:msg "registry changed" :change (:change e) :module (:module e)}))})
-        system (atom {:config config :registry reg :runtime rt})]
+        b (bus/new-bus)
+        system (atom {:config config :bus b})]
     (try
-      (runtime/attach-registry! rt reg)
-      (load-builtins! reg)
-      (let [port-ref (atom nil)
+      (let [st (store/open! (assoc (:db config) :path (config/db-path config) :bus b))
+            _ (swap! system assoc :store st)
+            rt (runtime/new-runtime {:config config :bus b :store st})
+            reg (registry/new-registry {:runtime rt :bus b :before-start (partial migrate-module! st)})]
+        (swap! system assoc :registry reg :runtime rt)
+        (runtime/attach-registry! rt reg)
+        (load-builtins! reg))
+      (let [reg (:registry @system)
+            port-ref (atom nil)
             {:keys [host port allowed-origins]} (:http config)
             server (hk/run-server (http/handler {:registry reg :profile :admin
                                                  :port port-ref :allowed-origins allowed-origins})
@@ -94,6 +109,7 @@
                   :port actual-port
                   :version config/hub-version
                   :nrepl-port nrepl-port
+                  :db (config/db-path config)
                   :started-at (str (java.time.Instant/now))}
             daemon-file (write-daemon-file! dir info)]
         (log/info (assoc info :msg "daemon started" :daemon-file daemon-file
@@ -105,12 +121,15 @@
         (throw e)))))
 
 (defn stop!
-  "Stop the HTTP listener and the nREPL, stop every module, remove daemon.edn.
-   Tolerates a partially started system."
-  [{:keys [server nrepl registry daemon-file]}]
+  "Stop the HTTP listener and the nREPL, stop every module, drain the writer
+   and close the database, stop the bus, remove daemon.edn. Tolerates a
+   partially started system."
+  [{:keys [server nrepl registry store bus daemon-file]}]
   (when server (try (hk/server-stop! server) (catch Exception e (log/warn {:msg "server stop failed" :error (ex-message e)}))))
   (when nrepl (try (nrepl/stop-server! nrepl) (catch Exception e (log/warn {:msg "nrepl stop failed" :error (ex-message e)}))))
   (when registry (registry/stop-all! registry))
+  (when store (try (store/close! store) (catch Exception e (log/warn {:msg "store close failed" :error (ex-message e)}))))
+  (when bus (bus/stop! bus))
   (when (and daemon-file (fs/exists? daemon-file)) (fs/delete daemon-file))
   (log/info {:msg "daemon stopped"})
   nil)

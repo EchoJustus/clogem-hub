@@ -10,6 +10,7 @@
   (:require [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [clogem.hub.bus :as bus]
             [clogem.hub.config :as config]
             [clogem.hub.log :as log]
             [clogem.hub.mcp.http :as http]
@@ -25,8 +26,9 @@
 (defn- handler
   ([] (handler #{}))
   ([allowed-origins]
-   (let [rt (runtime/new-runtime config/defaults)
-         reg (registry/new-registry {:runtime rt})]
+   (let [test-bus (bus/new-bus) ; one bus per registry; its threads are daemon threads
+        rt (runtime/new-runtime {:config config/defaults :bus test-bus})
+         reg (registry/new-registry {:runtime rt :bus test-bus})]
      (runtime/attach-registry! rt reg)
      (registry/register! reg (manifest/read-manifest (io/resource "clogem/module/system/manifest.edn")))
      (registry/register! reg (manifest/read-manifest (io/resource "clogem/module/echo/manifest.edn")))

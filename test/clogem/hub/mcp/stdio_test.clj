@@ -18,9 +18,12 @@
 
 (use-fixtures :once (fn [f] (log/set-level! :error) (try (f) (finally (log/set-level! :info)))))
 
+(defn- test-config [dir overrides]
+  (config/load-config (merge {:http {:port 0} :db {:path (str (fs/path dir "clogem.db"))}} overrides)))
+
 (defn- with-daemon [f]
   (let [dir (fs/create-temp-dir {:prefix "clogem-daemon"})
-        system (daemon/start! {:config (config/load-config {:http {:port 0}}) :runtime-dir (str dir)})]
+        system (daemon/start! {:config (test-config dir {}) :runtime-dir (str dir)})]
     (try (f system)
          (finally (daemon/stop! system) (fs/delete-tree dir)))))
 
@@ -90,8 +93,8 @@
 
 (deftest start-failures-leave-nothing-behind
   (let [dir (fs/create-temp-dir {:prefix "clogem-daemon-busy"})
-        first-system (daemon/start! {:config (config/load-config {:http {:port 0}}) :runtime-dir (str dir)})
-        busy (config/load-config {:http {:port (:port first-system)}})]
+        first-system (daemon/start! {:config (test-config dir {}) :runtime-dir (str dir)})
+        busy (test-config dir {:http {:port (:port first-system)}})]
     (try
       (is (thrown? Exception (daemon/start! {:config busy :runtime-dir (str dir)})) "port in use")
       (is (= 200 (:status (babashka.http-client/post (str "http://127.0.0.1:" (:port first-system) "/mcp")
@@ -103,11 +106,14 @@
 
 (deftest daemon-lifecycle
   (with-daemon
-    (fn [{:keys [port daemon-file registry]}]
+    (fn [{:keys [port daemon-file registry store bus]}]
       (is (pos? port))
       (is (fs/exists? daemon-file))
       (let [info (clojure.edn/read-string (slurp daemon-file))]
         (is (= port (:port info)))
         (is (= "127.0.0.1" (:host info)))
-        (is (pos? (:pid info))))
+        (is (pos? (:pid info)))
+        (is (= (:path store) (:db info)) "daemon.edn names the database"))
+      (is (fs/exists? (:path store)))
+      (is (= [:db/tx :system/health :system/modules] (clogem.hub.bus/owners bus)))
       (is (= [:system] (clogem.hub.registry/module-ids registry))))))
