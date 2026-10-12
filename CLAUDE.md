@@ -11,7 +11,8 @@ modules from their `manifest.edn`), the in-process `core.async` bus, the single-
 store, the MCP facade (Streamable HTTP on 127.0.0.1:7788 plus a stdio proxy), the process runner
 for ffmpeg/ffprobe/whisper-cli, the LLM provider adapter (Ollama first) and the runtime behind
 `clogem.api`. Built-in modules: `system` (S01), `media` and `ui` (S04). Proprietary modules may be
-loaded at runtime from `~/.config/clogem/modules.edn`; this repository never references them.
+loaded at runtime from `modules.edn` in the config directory (`%LOCALAPPDATA%\clogem\` on Windows,
+`~/.config/clogem/` on POSIX); this repository never references them.
 
 ## Commands
 
@@ -19,10 +20,9 @@ loaded at runtime from `~/.config/clogem/modules.edn`; this repository never ref
 bb test            # clojure.test over test/**/*_test.clj
 bb lint            # fitness checks; must be green before every commit
 bb dev             # daemon in the foreground; nREPL on a random loopback port, both recorded in daemon.edn
-bb daemon          # daemon in the foreground without nREPL (systemd unit, stdio autostart); a second one exits 3
+bb daemon          # daemon in the foreground without nREPL (stdio autostart, the package's startup task); a second one exits 3, system_shutdown exits 0
 bb shim            # stdio MCP proxy to the running daemon, starting it when none answers
 bb token <client>  # print a client's bearer token from clients.edn (created on first use)
-bb systemd:install # write ~/.config/systemd/user/clogem-hub.service and print the enable commands
 bb guard:public    # leak guard: denylist + home paths + tokens + private files, tree and history
 bb hooks:install   # pre-commit (guard:public --staged) + commit-msg (guard:message) hooks
 ```
@@ -35,11 +35,11 @@ rules run. The denylist is never copied into this repository.
 
 ```text
 LICENSE  README.md  CLAUDE.md  bb.edn  .gitignore
-src/clogem/hub/{registry,bus,config,log,daemon,runtime,jobs,lock,auth,audit,systemd}.clj
-src/clogem/hub/mcp/{jsonrpc,methods,http,stdio,subscriptions}.clj   resources/clogem/hub/systemd/clogem-hub.service
+src/clogem/hub/{registry,bus,config,log,daemon,runtime,jobs,lock,auth,audit,platform}.clj
+src/clogem/hub/mcp/{jsonrpc,methods,http,stdio,subscriptions}.clj   scripts/acceptance-windows.ps1   .github/workflows/ci.yml
 src/clogem/hub/db/{sqlite,sql,writer,reader,migrate,store}.clj      resources/clogem/hub/db/migrations/NNNN-slug.sql
 src/clogem/module/system/{core,tools}.clj                resources/clogem/module/system/manifest.edn
-test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)   test/fixtures/db/ (kill-test child script)
+test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)   test/fixtures/db/ (kill-test and stop-test child scripts)
 docs/adr/  docs/mcp-compliance.md  docs/deps.md
 planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, media/ llm/ and module/{media,ui} (S04), docs/roadmap.md
 ```
@@ -76,8 +76,16 @@ planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, media/ llm/ and module/{
   behind an explicit option, after verification, with a backup.
 - **Local-first (PD-9):** runtime egress only to explicitly configured loopback/LAN endpoints;
   config validation rejects anything else unless the user overrides. No telemetry.
-- **Filesystem hygiene (PD-10):** data on ext4; refuse 9p/v9fs/drvfs paths (`findmnt -n -o FSTYPE -T`);
-  sockets and locks in `$XDG_RUNTIME_DIR/clogem/`; never write under `/mnt/*`.
+- **Filesystem hygiene (PD-10, ADR-0006):** the database, lock and artifacts live on a local NTFS or
+  ReFS volume on Windows (`System.IO.DriveInfo` through PowerShell; UNC paths, network, removable
+  and FAT volumes are refused, a OneDrive folder warns) and never on a 9p/v9fs/drvfs mount or a
+  network filesystem on POSIX (`findmnt`). Runtime files (`daemon.edn`, `daemon.lock`, `daemon.log`)
+  live in the runtime directory: `%LOCALAPPDATA%\clogem\run\` or `$XDG_RUNTIME_DIR/clogem/`.
+- **Platform calls (ADR-0006):** everything that differs between Windows and POSIX (POSIX
+  permissions, `findmnt`, PowerShell, `icacls`) lives in `clogem.hub.platform` behind
+  `windows?`, as pure decisions over the tools' output plus thin shell glue; `bb lint` refuses
+  those calls anywhere else (`:restricted-call`). Windows behaviour is proven on the
+  `windows-latest` CI job and on a build-19044 VM with `scripts/acceptance-windows.ps1`.
 - **Spec over memory (PD-11):** MCP revision 2026-07-28 and legacy `initialize` clients. Read
   the spec before implementing; `docs/mcp-compliance.md` lists every method, header, field,
   status and error code with its source URL.
@@ -94,20 +102,29 @@ planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, media/ llm/ and module/{
 - **Conventions (§2.7):** manifests are the source of truth for tools, resources, prompts, events,
   migrations, UI cards and routes; tool names `^[a-z][a-z0-9_]{0,63}$` prefixed `<id>_`; honest
   `destructiveHint`/`idempotentHint`; resources `clogem://<module>/<kind>/<id>`; integer
-  milliseconds internally; XDG paths; `clojure.edn` only for external EDN, never `eval`.
+  milliseconds internally; `%LOCALAPPDATA%\clogem\` on Windows and the XDG layout on POSIX
+  (`clogem.hub.config/paths`); `clojure.edn` only for external EDN, never `eval`.
 - **Guardrails are executable (PD-12):** never weaken, skip or delete a lint, guard or test.
 - **MCP (S01):** `docs/mcp-compliance.md` is the rule book (every method, header, status and error
   code with its source). Dual-era: modern requests carry `params._meta`; `initialize`/`ping` are
   legacy. Every result has `resultType` and `_meta serverInfo`; lists carry `ttlMs`/`cacheScope`.
-- **Lifecycle and security (S03, ADR-0005):** one daemon per user through `daemon.lock`
-  (`clogem.hub.lock`); every HTTP request needs `Authorization: Bearer <token>` from
-  `clients.edn` (mode 0600, `clogem.hub.auth`; 401 otherwise, no bypass); the client's profile
+- **Lifecycle and security (S03, ADR-0005; Windows port S03b, ADR-0006):** one daemon per user
+  through `daemon.lock` (`clogem.hub.lock`; mandatory on Windows, where the holder's pid comes
+  from `daemon.edn`); every HTTP request needs `Authorization: Bearer <token>` from
+  `clients.edn` (readable by this user only: mode 0600 or an owner-only DACL, `clogem.hub.auth`;
+  401 otherwise, no bypass); the client's profile
   scopes list and call, `:llm-small` sees at most 10 tools; `tools/call`, `resources/read`,
   `subscriptions/listen` and rejected authentications land in the `audit` table without
   arguments, results or tokens (`clogem.hub.audit`); `subscriptions/listen` is an SSE stream fed
   by `clogem.hub.mcp.subscriptions` from `:registry/changed` and `:resource/updated`; the stdio
   proxy carries the `stdio` client's token, streams listen frames and starts the daemon when
-  none answers; `bb systemd:install` writes the user unit and only prints the enable commands.
+  none answers (a detached `bb daemon` run by the proxy's own binary); the graceful stop is the
+  admin-only `system_shutdown` tool (bus command `:system/shutdown` owned by the daemon:
+  reply first, stop after 250 ms, exit 0 under `bb daemon`), with SIGTERM/SIGINT where the OS
+  delivers them; a configured shared directory (`CLOGEM_SHARED_DIR` or `:shared-dir`, the
+  packaged hub's publisher cache folder) receives a copy of `daemon.edn` and one owner-only
+  token file per client for the other packages of the same publisher.
 - **ADRs:** `docs/adr/NNNN-slug.md`, public-safe: 0001 modular monolith and two channels, 0002
   dual-era MCP, 0003 single writer and pod semantics, 0005 lifecycle and security (lock, tokens,
-  profiles, audit, subscription stream, systemd). Session logs never live here.
+  profiles, audit, subscription stream), 0006 Windows as the product platform (paths, owner-only
+  files, in-band shutdown, volume check, CI matrix). Session logs never live here.

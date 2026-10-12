@@ -1,6 +1,9 @@
 # ADR-0005: One daemon per user, bearer tokens with profiles, audit, subscription stream
 
 Status: Accepted (S03, 2026-10-12). Supersedes the "unauthenticated until S03" part of ADR-0002.
+Amended by ADR-0006 (S03b, 2026-10-12): Windows is the product platform, so the systemd unit
+and the WSL2 wording below are history; the lock, the owner-only clients file and the stop are
+implemented per platform, and the graceful stop is the in-band `system_shutdown` tool.
 
 ## Context
 
