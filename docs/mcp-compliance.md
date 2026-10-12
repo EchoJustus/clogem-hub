@@ -1,7 +1,9 @@
 # MCP compliance: what the hub implements and where each rule comes from
 
 Read on 2026-10-03 from the live specification pages (Mintlify `.md` renditions where the
-HTML was rate-limited), the release post and the Claude Code MCP docs. `SPEC` below is
+HTML was rate-limited), the release post and the Claude Code MCP docs; the subscriptions,
+cancellation, resources, Streamable HTTP and changelog pages and `schema.ts` were re-read on
+2026-10-12 for S03. `SPEC` below is
 `https://modelcontextprotocol.io/specification/2026-07-28`. The TypeScript schema at
 `github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts`
 is the source of truth; the JSON Schema is generated from it.
@@ -53,14 +55,18 @@ Era detection in the hub: a request whose `params._meta` carries
 | `initialize` | legacy | `protocolVersion`, `capabilities`, `clientInfo` | `protocolVersion` (requested if supported, else `2025-11-25`), `capabilities`, `serverInfo`, `instructions` | `…/2025-11-25/basic/lifecycle` |
 | `notifications/initialized` | legacy | notification | none (HTTP 202) | `…/2025-11-25/basic/lifecycle` |
 | `ping` | legacy only; removed in 2026-07-28 | none | `{}` (plus `resultType`/`_meta`, harmless in an open map) | `…/2025-11-25/basic/utilities/ping`; `SPEC/changelog` (removal) |
-| `notifications/cancelled` | both (stdio and HTTP; accepted with 202) | `requestId`, `reason?` | none; S01 handlers are synchronous so there is nothing to cancel | `SPEC/basic/patterns/cancellation` |
+| `notifications/cancelled` | both (stdio and HTTP; accepted with 202) | `requestId`, `reason?` | none at the daemon (handlers are synchronous); the stdio proxy closes the listen stream it names | `SPEC/basic/patterns/cancellation` |
+| `resources/list` | both | optional `cursor` | `resources[]` (`uri name title? description? mimeType?`, the profile's resources ordered by URI), `ttlMs`, `cacheScope` | `SPEC/server/resources` |
+| `resources/templates/list` | both | optional `cursor` | `resourceTemplates[]` (`uriTemplate name title? description? mimeType?`) | `SPEC/server/resources` |
+| `resources/read` | both | `uri` | `contents[]` with `uri`, `mimeType`, `text` or `blob`; a template instance resolves its `{var}` segments; unknown → `-32602 Resource not found` with `data.uri` (never an empty `contents`); handler exception → `-32603` | `SPEC/server/resources` |
+| `subscriptions/listen` | modern only (legacy → `-32601`) | `notifications` filter: `toolsListChanged`, `promptsListChanged`, `resourcesListChanged`, `resourceSubscriptions[]` | an SSE stream: `notifications/subscriptions/acknowledged` first (honored filter: prompts dropped, URIs the profile cannot read dropped), then the opted-in notifications, each with `_meta io.modelcontextprotocol/subscriptionId` = the request id; ended by the client closing the stream, or by the server with the request's own `resultType "complete"` result | `SPEC/basic/patterns/subscriptions`, `SPEC/schema` (`SubscriptionsListenRequest`) |
 | anything else | both | — | `-32601 Method not found`; HTTP 404 on modern requests | `SPEC/basic/transports/streamable-http` |
 
-Not in S01 (planned): `resources/list`, `resources/templates/list`, `resources/read`,
-`prompts/list`, `prompts/get` (capabilities not declared, so their methods are `-32601`),
-`subscriptions/listen` and the legacy GET SSE stream (S03), `completion/complete`, MRTR
-(`input_required` results), `notifications/progress`, `x-mcp-header` / `Mcp-Param-*` validation
-(optional for servers; the hub does not declare any `x-mcp-header`).
+Not implemented (planned or out of scope): `prompts/list`, `prompts/get` (no `prompts`
+capability, so `-32601`), `completion/complete`, MRTR (`input_required` results),
+`notifications/progress`, `x-mcp-header` / `Mcp-Param-*` validation (optional for servers; the
+hub declares no `x-mcp-header`), the legacy GET SSE stream and `resources/subscribe` (removed in
+2026-07-28; legacy clients are promised no notifications).
 
 ### Tool objects (`SPEC/server/tools`, `SPEC/schema`)
 
@@ -90,9 +96,35 @@ The hub uses `ttlMs 60000` and `cacheScope "private"` (lists vary by client prof
 ### Capabilities (`SPEC/schema`)
 
 `ServerCapabilities`: `tools {listChanged}`, `resources {subscribe, listChanged}`,
-`prompts {listChanged}`, `completions`, `logging` (deprecated), `extensions`. S01 declares
-`{"tools": {"listChanged": false}}` only; `listChanged: true` arrives with `subscriptions/listen`
-(S03). Logging is deprecated (SEP-2577): the hub logs to stderr and declares no `logging`.
+`prompts {listChanged}`, `completions`, `logging` (deprecated), `extensions`. `server/discover`
+declares `{"tools": {"listChanged": true}, "resources": {"subscribe": true, "listChanged": true}}`
+because modern clients can open `subscriptions/listen`; the legacy `initialize` result declares
+`listChanged false` and `subscribe false` because no stream exists for legacy clients. Logging
+is deprecated (SEP-2577): the hub logs to stderr and declares no `logging`.
+
+### Resources (`SPEC/server/resources`)
+
+Resource and template objects come from the manifests (`clogem://<module>/<kind>/<id>`,
+templates with `{var}` segments). The hub validates URIs against the registry (a declared URI or
+an instance of a declared template, within the caller's profile) before any handler runs. The
+not-found code is `-32602` (changed from `-32002` in 2026-07-28). Updates: a module publishes
+the SDK event `:resource/updated {:uri}`; the hub forwards it as
+`notifications/resources/updated` to the listen streams whose `resourceSubscriptions` name that
+URI. `notifications/resources/list_changed` and `notifications/tools/list_changed` follow every
+registry change.
+
+### Subscriptions (`SPEC/basic/patterns/subscriptions`, `SPEC/basic/patterns/cancellation`)
+
+| Rule | Hub behaviour |
+|---|---|
+| The server MUST NOT send notification types the client did not request | per-stream filter; prompts never, URIs outside the profile never |
+| `notifications/subscriptions/acknowledged` MUST be the first message and carries the honored subset | sent synchronously before the stream is registered for fan-out |
+| Every message carries `io.modelcontextprotocol/subscriptionId` = the listen request id | yes, including the closing result |
+| Client cancellation: close the stream (HTTP) or `notifications/cancelled` (stdio) | HTTP: the disconnect removes the stream; stdio: the proxy closes the HTTP stream and forwards nothing more for it |
+| Server teardown: SHOULD answer the listen request with a `complete` result, then close | done on daemon stop (`clogem.hub.mcp.subscriptions/stop!`) |
+| Cancellation page: the server MUST send `notifications/cancelled` when tearing down a listen stream | read with the schema comment ("on stdio, the server also sends this notification"): over HTTP the result is the signal; the stdio proxy emits `notifications/cancelled` when a stream ends without the result (conflict recorded below) |
+| Keep-alive comment lines are encouraged | `: keepalive` every `:subscriptions :keepalive-ms` (15 s) |
+| No resumability (`Last-Event-ID`) | none; a reconnecting client re-subscribes |
 
 ## Streamable HTTP (`SPEC/basic/transports/streamable-http`)
 
@@ -101,7 +133,7 @@ The hub uses `ttlMs 60000` and `cacheScope "private"` (lists vary by client prof
 | One endpoint path supporting POST; GET stream and sessions removed | `POST /mcp`; `GET`/`DELETE`/others → `405 Method Not Allowed`, `Allow: POST`; other paths → 404 | transports/streamable-http |
 | Servers MUST validate `Origin`: present and invalid → `403 Forbidden` (body MAY be an id-less JSON-RPC error); SHOULD bind 127.0.0.1 | absent Origin accepted; `http(s)://127.0.0.1[:port]`, `localhost`, `[::1]` and configured `:allowed-origins` accepted; anything else (including `null`) → 403 with an id-less JSON-RPC error | transports/streamable-http |
 | Host header check (DNS-rebinding defence, house rule) | `Host` must be `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` (bare host when the port is 80) → else 403 | house rule; rationale: transports/streamable-http "DNS rebinding" |
-| Client MUST send `Accept: application/json, text/event-stream`; server answers JSON (one object) or SSE | hub answers `application/json` only in S01; `Accept` is not enforced (legacy clients vary) | transports/streamable-http |
+| Client MUST send `Accept: application/json, text/event-stream`; server answers JSON (one object) or SSE | JSON for every request except `subscriptions/listen`, which is `text/event-stream` with `Cache-Control: no-cache` and `X-Accel-Buffering: no`; `Accept` is not enforced (legacy clients vary) | transports/streamable-http |
 | Request body `Content-Type: application/json` (media type compared exactly; parameters such as `charset` allowed) | else `415 Unsupported Media Type` | spec examples; house rule |
 | Exactly one JSON value per body | trailing bytes, concatenated messages or an empty body → `400` + `-32700` | transports/streamable-http |
 | A request (with id) named `notifications/*` | `-32600 Invalid Request` | `SPEC/basic` (notifications carry no id) |
@@ -114,11 +146,13 @@ The hub uses `ttlMs 60000` and `cacheScope "private"` (lists vary by client prof
 | Missing `MCP-Protocol-Version` MAY be treated as `2025-03-26` by servers supporting pre-2025-06-18 clients | legacy requests are served identically with or without the header (the three legacy revisions differ only in HTTP header handling, not in the methods the hub serves); an unknown version in the header → `400` + `-32022` | transports/streamable-http; `…/2025-11-25/basic/transports` |
 | Modern server receiving legacy traffic: ignore `Mcp-Session-Id` (never mint/echo), ignore `Last-Event-ID` | S01 mints no sessions; legacy requests are served statelessly (allowed: a legacy server MAY assign a session) | transports/streamable-http; 2025-11-25 transports |
 | Dual-era clients detect the era from a 400's body: a recognized modern error means modern | every 400 carries a well-formed modern JSON-RPC error body | transports/streamable-http |
-| Closing an SSE stream is cancellation; `X-Accel-Buffering: no` on SSE | no SSE in S01 | transports/streamable-http |
-| HTTP transports SHOULD follow the MCP Authorization spec | **conscious deviation (ADR-0002):** loopback daemon with per-client bearer tokens from `clients.edn` (S03); no OAuth | `SPEC/basic` ("auth") |
+| Closing an SSE stream is cancellation; `X-Accel-Buffering: no` on SSE | the listen stream's `on-close` ends the subscription; the header is sent | transports/streamable-http |
+| HTTP transports SHOULD follow the MCP Authorization spec | **conscious deviation (ADR-0002, ADR-0005):** loopback daemon with per-client bearer tokens from `clients.edn` (mode 0600); no OAuth. Missing or wrong token → `401`, `WWW-Authenticate: Bearer realm="clogem-hub"`, id-less `-32600` body; checked after Host and Origin, before content type and body | `SPEC/basic` ("auth"); RFC 6750 §3 |
 
-No authentication in S01, by design: loopback binding, the Host and Origin checks and the
-JSON-only content type bound the exposure until S03 adds bearer tokens (hub ADR-0002).
+Authentication and profiles (S03): the token's client profile (`:gui :llm-small :llm-large
+:admin`) selects the tools, resources and templates the request sees and may call; `:llm-small`
+sees at most 10 tools. `tools/call`, `resources/read`, `subscriptions/listen` and rejected
+authentications are recorded in the `audit` table (no arguments, results or tokens).
 
 ## stdio (`SPEC/basic/transports/stdio`)
 
@@ -130,12 +164,15 @@ JSON-only content type bound the exposure until S03 adds bearer tokens (hub ADR-
 | Server SHOULD exit promptly on stdin EOF | the proxy exits on EOF | transports/stdio |
 | Cancellation on stdio is `notifications/cancelled` | forwarded as a notification; nothing to cancel in S01 | transports/stdio |
 | Daemon discovery | the proxy reads `daemon.edn` from the runtime directory (port of a live pid), falling back to the configured port | house rule (PD-4) |
-| Daemon unreachable | the proxy answers the request itself with `-32603` and `data.reason "daemon unavailable"`, and prints one clear line on stderr | house rule (PD-4) |
+| Daemon unreachable | the proxy starts one (`systemctl --user start clogem-hub` when that unit is enabled, else a detached `bb daemon`) and waits up to `:stdio :start-timeout-ms` for `daemon.edn`; if none comes up it answers requests itself with `-32603` and `data.reason "daemon unavailable"`, and prints one clear line on stderr | house rule (PD-4, ADR-0005) |
+| Authentication on stdio | there is no header layer for the client; the proxy adds the bearer token of its own `clients.edn` client (`:stdio :client`, `CLOGEM_CLIENT`) to every forwarded POST | house rule (ADR-0005) |
+| `subscriptions/listen` on stdio: acknowledgment first, `subscriptionId` on every message, client cancels with `notifications/cancelled`, server tears down with `notifications/cancelled` | the proxy streams the daemon's SSE events as frames; a client `notifications/cancelled` naming the request closes the stream; when a stream ends without the listen result the proxy emits `notifications/cancelled` for it | `SPEC/basic/patterns/subscriptions`, `SPEC/basic/patterns/cancellation` |
 
 ## Claude Code specifics (`https://code.claude.com/docs/en/mcp`)
 
-- `claude mcp add --transport http clogem http://127.0.0.1:7788/mcp`; `claude mcp get clogem`
-  reports `✔ Connected`. Stdio: `claude mcp add --transport stdio clogem-stdio -- bb --config <abs>/clogem-hub/bb.edn shim`.
+- `claude mcp add --transport http clogem http://127.0.0.1:7788/mcp --header "Authorization: Bearer $(bb token llm)"`;
+  `claude mcp list` reports `✔ Connected`. Stdio: `claude mcp add --transport stdio clogem-stdio -- bb --config <abs>/clogem-hub/bb.edn shim`
+  (the proxy carries the `stdio` client's token itself and starts the daemon when needed).
 - Claude Code v2 asks HTTP servers for 2026-07-28; stdio servers stay on `initialize` unless
   `MCP_PROTOCOL_NEGOTIATION=auto`. Hence the dual-era server.
 - Tool descriptions and server `instructions` are truncated at 2,048 characters (house limit:
@@ -151,6 +188,9 @@ JSON-only content type bound the exposure until S03 adds bearer tokens (hub ADR-
   says capabilities are per request. The per-request model is authoritative.
 - Subscription teardown: the cancellation page says the server MUST send `notifications/cancelled`
   when tearing down a `subscriptions/listen` stream; the subscriptions page says it SHOULD answer
-  the listen request with a `resultType: "complete"` result. Resolve in S03.
+  the listen request with a `resultType: "complete"` result. Resolved in S03 with the schema's
+  wording ("on stdio, the server also sends this notification"): over HTTP the hub sends the
+  result and closes; over stdio the proxy adds `notifications/cancelled` when a stream ends
+  without that result (ADR-0005).
 - Header spelling differs between pages (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Session-Id`
   vs `MCP-Session-Id`); names are case-insensitive, so the hub compares lower-cased names.

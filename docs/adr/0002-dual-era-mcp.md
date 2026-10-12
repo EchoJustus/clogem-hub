@@ -1,6 +1,6 @@
 # ADR-0002: Dual-era MCP server, loopback-only, unauthenticated until S03
 
-Status: Accepted (S01, 2026-10-03)
+Status: Accepted (S01, 2026-10-03); the transport-scope and authentication paragraphs are superseded by ADR-0005 (S03)
 
 ## Context
 

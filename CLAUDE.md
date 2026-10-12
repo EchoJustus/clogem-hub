@@ -19,7 +19,10 @@ loaded at runtime from `~/.config/clogem/modules.edn`; this repository never ref
 bb test            # clojure.test over test/**/*_test.clj
 bb lint            # fitness checks; must be green before every commit
 bb dev             # daemon in the foreground; nREPL on a random loopback port, both recorded in daemon.edn
-bb shim            # stdio MCP proxy to the running daemon
+bb daemon          # daemon in the foreground without nREPL (systemd unit, stdio autostart); a second one exits 3
+bb shim            # stdio MCP proxy to the running daemon, starting it when none answers
+bb token <client>  # print a client's bearer token from clients.edn (created on first use)
+bb systemd:install # write ~/.config/systemd/user/clogem-hub.service and print the enable commands
 bb guard:public    # leak guard: denylist + home paths + tokens + private files, tree and history
 bb hooks:install   # pre-commit (guard:public --staged) + commit-msg (guard:message) hooks
 ```
@@ -32,7 +35,8 @@ rules run. The denylist is never copied into this repository.
 
 ```text
 LICENSE  README.md  CLAUDE.md  bb.edn  .gitignore
-src/clogem/hub/{registry,bus,config,log,daemon,runtime,jobs}.clj   src/clogem/hub/mcp/{jsonrpc,methods,http,stdio}.clj
+src/clogem/hub/{registry,bus,config,log,daemon,runtime,jobs,lock,auth,audit,systemd}.clj
+src/clogem/hub/mcp/{jsonrpc,methods,http,stdio,subscriptions}.clj   resources/clogem/hub/systemd/clogem-hub.service
 src/clogem/hub/db/{sqlite,sql,writer,reader,migrate,store}.clj      resources/clogem/hub/db/migrations/NNNN-slug.sql
 src/clogem/module/system/{core,tools}.clj                resources/clogem/module/system/manifest.edn
 test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)   test/fixtures/db/ (kill-test child script)
@@ -95,6 +99,15 @@ planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, media/ llm/ and module/{
 - **MCP (S01):** `docs/mcp-compliance.md` is the rule book (every method, header, status and error
   code with its source). Dual-era: modern requests carry `params._meta`; `initialize`/`ping` are
   legacy. Every result has `resultType` and `_meta serverInfo`; lists carry `ttlMs`/`cacheScope`.
+- **Lifecycle and security (S03, ADR-0005):** one daemon per user through `daemon.lock`
+  (`clogem.hub.lock`); every HTTP request needs `Authorization: Bearer <token>` from
+  `clients.edn` (mode 0600, `clogem.hub.auth`; 401 otherwise, no bypass); the client's profile
+  scopes list and call, `:llm-small` sees at most 10 tools; `tools/call`, `resources/read`,
+  `subscriptions/listen` and rejected authentications land in the `audit` table without
+  arguments, results or tokens (`clogem.hub.audit`); `subscriptions/listen` is an SSE stream fed
+  by `clogem.hub.mcp.subscriptions` from `:registry/changed` and `:resource/updated`; the stdio
+  proxy carries the `stdio` client's token, streams listen frames and starts the daemon when
+  none answers; `bb systemd:install` writes the user unit and only prints the enable commands.
 - **ADRs:** `docs/adr/NNNN-slug.md`, public-safe: 0001 modular monolith and two channels, 0002
-  dual-era MCP, loopback-only and unauthenticated until S03, 0003 single writer and pod
-  semantics. Session logs never live here.
+  dual-era MCP, 0003 single writer and pod semantics, 0005 lifecycle and security (lock, tokens,
+  profiles, audit, subscription stream, systemd). Session logs never live here.
