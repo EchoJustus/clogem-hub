@@ -44,12 +44,36 @@
   dev
   {:doc "Run the daemon in the foreground on 127.0.0.1 (port from config or CLOGEM_PORT) with an nREPL on a random loopback port; daemon.edn records both."
    :requires ([clogem.hub.daemon :as daemon])
+   :task (daemon/-main "--nrepl")}
+
+  daemon
+  {:doc "Run the daemon in the foreground without an nREPL (what the systemd unit and the stdio proxy's autostart run). A second daemon exits 3."
+   :requires ([clogem.hub.daemon :as daemon])
    :task (daemon/-main)}
 
   shim
-  {:doc "The stdio MCP door: proxy newline-delimited JSON-RPC on stdin/stdout to the running daemon."
+  {:doc "The stdio MCP door: proxy newline-delimited JSON-RPC on stdin/stdout to the running daemon, starting it when none answers."
    :requires ([clogem.hub.mcp.stdio :as stdio])
    :task (stdio/-main)}
+
+  token
+  {:doc "Print the bearer token of a client from clients.edn (created with default clients when missing): bb token <client-id>, e.g. llm, gui, admin, stdio."
+   :requires ([clogem.hub.auth :as auth] [clogem.hub.config :as config])
+   :task (let [id (first *command-line-args*)
+               path (config/clients-file (config/load-config))
+               clients (auth/load-clients! path)]
+           (if-let [t (and id (auth/client-token clients id))]
+             (println t)
+             (do (binding [*out* *err*]
+                   (println (str "usage: bb token <client-id>; clients in " path ": "
+                                 (str/join ", " (keys (:clients clients))))))
+                 (System/exit 1))))}
+
+  systemd:install
+  {:doc "Write the systemd user unit for this checkout to ~/.config/systemd/user/clogem-hub.service and print the commands to enable it (never run here)."
+   :requires ([clogem.hub.systemd :as systemd])
+   :task (let [{:keys [next-steps]} (systemd/install!)]
+           (doseq [line next-steps] (println line)))}
 
   guard:public
   {:doc "Leak guard: workspace denylist, home paths, tokens, private files. Tree and history; --staged scans the index only (pre-commit)."
