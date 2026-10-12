@@ -1,0 +1,86 @@
+# © 2026 EchoJustus (Email: EchoJustus.Studio@outlook.com)
+#
+# This program and the accompanying materials are made available under the
+# terms of the Eclipse Public License 2.0 which is available at
+# https://www.eclipse.org/legal/epl-2.0
+#
+# SPDX-License-Identifier: EPL-2.0
+
+# Tests, fitness checks and the leak guard on Linux and Windows (ADR-0006).
+# The SDK is checked out next to the hub (the hub's bb.edn depends on
+# ../clogem-sdk) from the same branch name, falling back to its default branch.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  BB_VERSION: 1.13.225
+  BB_SHA256_LINUX: ab0e98307405ba19e7c5ba0c3c7cd17a6f90aa90577a72709055f120796d6bfe
+  BB_SHA256_WINDOWS: b321d7faa560cf7a034d0633d7d0004ff6a4b8831a92f14c82f41362b81a4fcb
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: clogem-hub
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: clogem-hub
+      - name: Check out the SDK next to the hub (same branch, else its default)
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          if git ls-remote --exit-code --heads https://github.com/EchoJustus/clogem-sdk.git "$ref" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$ref" https://github.com/EchoJustus/clogem-sdk.git clogem-sdk
+          else
+            git clone --depth 1 https://github.com/EchoJustus/clogem-sdk.git clogem-sdk
+          fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Babashka (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSL -o bb.tar.gz "https://github.com/babashka/babashka/releases/download/v${BB_VERSION}/babashka-${BB_VERSION}-linux-amd64-static.tar.gz"
+          echo "${BB_SHA256_LINUX}  bb.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" && tar -xzf bb.tar.gz -C "$HOME/.local/bin" && rm bb.tar.gz
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Install Babashka (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "https://github.com/babashka/babashka/releases/download/v$env:BB_VERSION/babashka-$env:BB_VERSION-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile bb.zip
+          $hash = (Get-FileHash bb.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:BB_SHA256_WINDOWS) { throw "checksum mismatch: $hash" }
+          $dir = Join-Path $env:USERPROFILE 'bb'
+          Expand-Archive bb.zip -DestinationPath $dir -Force
+          Remove-Item bb.zip
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+      - name: Versions
+        run: bb --version
+      - name: Lint
+        run: bb lint
+      - name: Test
+        run: bb test
+      - name: Leak guard (built-in rules under CI)
+        env:
+          CI: 'true'
+        run: bb guard:public
