@@ -8,6 +8,7 @@
 
 (ns clogem.hub.auth-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [babashka.process :as p]
             [clojure.test :refer [deftest is testing]]
             [clogem.hub.auth :as auth]
@@ -79,7 +80,7 @@
           (is (= #{"gui.token" "llm.token"} (set (map fs/file-name (fs/list-dir tdir)))) "stale token files removed")
           (is (= (auth/client-token m "gui") (slurp (str (fs/path tdir "gui.token")))))
           (is (platform/secure-file? (str (fs/path tdir "llm.token"))))))
-      (finally (log/set-level! :info) (fs/delete-tree dir)))))
+      (finally (log/set-level! :info) (support/delete-tree! dir)))))
 
 (deftest authentication-is-by-token-only
   (let [m (auth/generate)

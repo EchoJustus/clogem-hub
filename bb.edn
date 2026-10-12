@@ -21,7 +21,7 @@
    :task (let [files (if (fs/exists? "test") (fs/glob "test" "**_test.clj") [])
                ns-of (fn [f] (-> (str (fs/relativize "test" f))
                                  (str/replace (re-pattern "\\.clj$") "")
-                                 (str/replace "/" ".")
+                                 (str/replace (re-pattern "[\\\\/]") ".")
                                  (str/replace "_" "-")
                                  symbol))
                nss (sort (map ns-of files))]

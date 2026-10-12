@@ -8,6 +8,7 @@
 
 (ns clogem.hub.db.store-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [babashka.process :as p]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
@@ -28,7 +29,7 @@
         b (bus/new-bus)
         s (store/open! {:path (str (fs/path dir "clogem.db")) :bus b})]
     (try (f s b dir)
-         (finally (store/close! s) (bus/stop! b) (fs/delete-tree dir)))))
+         (finally (store/close! s) (bus/stop! b) (support/delete-tree! dir)))))
 
 (defn- count-of [s table]
   (-> (store/query s (str "SELECT count(*) AS n FROM " table)) first :n))
@@ -286,4 +287,4 @@
           (finally (store/close! s) (bus/stop! b))))
       (finally
         (when (.isAlive jproc) (.destroyForcibly jproc))
-        (fs/delete-tree dir)))))
+        (support/delete-tree! dir)))))

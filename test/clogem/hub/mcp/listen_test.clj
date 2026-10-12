@@ -11,6 +11,7 @@
    acknowledgment, resource updates, list changes, keep-alive and the
    graceful close when the daemon stops."
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [babashka.http-client :as http]
             [cheshire.core :as json]
             [clojure.java.io :as io]
@@ -115,7 +116,7 @@
             (is (= 77 (get-in closing [:result :_meta (keyword "io.modelcontextprotocol/subscriptionId")])))
             (is (= "clogem-hub" (get-in closing [:result :_meta (keyword "io.modelcontextprotocol/serverInfo") :name]))))
           (is (nil? (first (next-event reader))) "EOF after the result")))
-      (finally (try (daemon/stop! sys) (catch Exception _ nil)) (fs/delete-tree dir)))))
+      (finally (try (daemon/stop! sys) (catch Exception _ nil)) (support/delete-tree! dir)))))
 
 (deftest a-client-closing-its-stream-ends-the-subscription
   (let [dir (fs/create-temp-dir {:prefix "clogem-listen2"})
@@ -135,4 +136,4 @@
           (is (= 200 (:status r)))
           (is (= -32601 (get-in (json/parse-string (:body r) true) [:error :code]))))
         (is (= 405 (:status (http/get (:url sys) {:headers {"Authorization" (str "Bearer " (:token sys)) "Accept" "text/event-stream"} :throw false})))))
-      (finally (daemon/stop! sys) (fs/delete-tree dir)))))
+      (finally (daemon/stop! sys) (support/delete-tree! dir)))))

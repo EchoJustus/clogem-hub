@@ -8,6 +8,7 @@
 
 (ns clogem.hub.db.sqlite-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [clogem.hub.db.sqlite :as sqlite]
             [clogem.hub.log :as log]))
@@ -53,7 +54,7 @@
         (sqlite/execute! db ["INSERT INTO ty VALUES (?,?,?,?,?,?)" :kw true nil 1.5 42 (byte-array [1 2 3])])
         (is (= [{:k "kw" :b 1 :n nil :d 1.5 :l 42 :bl [1 2 3]}] (sqlite/query db "SELECT * FROM ty"))
             "keywords become their name, booleans integers, blobs byte vectors"))
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))
 
 (deftest a-hung-or-dead-pod-is-replaced
   (let [[dir db] (temp-db)
@@ -73,7 +74,7 @@
           (is (= (inc (:timeouts before)) (:timeouts after)))
           (is (= (inc (:restarts before)) (:restarts after)))
           (is (= (inc (:generation before)) (:generation after)))))
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))
 
 (deftest concurrent-calls-are-serialized-and-all-answered
   (let [[dir db] (temp-db)]
@@ -89,4 +90,4 @@
         (is (not-any? #{:timeout} results) "no call hangs: the gate serializes the pod")
         (is (= [{:n 100}] (sqlite/query db "SELECT count(*) AS n FROM t")))
         (is (= 0 (:busy (sqlite/stats))) "zero SQLITE_BUSY"))
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))

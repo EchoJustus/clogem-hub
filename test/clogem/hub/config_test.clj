@@ -8,6 +8,7 @@
 
 (ns clogem.hub.config-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clogem.hub.config :as config]))
@@ -79,4 +80,4 @@
       (is (= {:http {:port 1234}} (config/read-edn-file (fs/path dir "ok.edn"))))
       (spit (str (fs/path dir "evil.edn")) "#=(+ 1 2)")
       (is (thrown? Exception (config/read-edn-file (fs/path dir "evil.edn"))))
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))

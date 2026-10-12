@@ -8,6 +8,7 @@
 
 (ns clogem.hub.platform-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clogem.hub.platform :as platform]))
@@ -98,4 +99,4 @@
       (is (platform/secure-file? f) "owner-only after secure-file!")
       (is (= "{}" (slurp f)) "still readable by the owner")
       (is (not (platform/secure-file? (str (fs/path dir "missing.edn")))) "a missing file proves nothing")
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))

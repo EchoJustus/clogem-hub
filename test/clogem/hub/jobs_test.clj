@@ -8,6 +8,7 @@
 
 (ns clogem.hub.jobs-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [clogem.hub.bus :as bus]
             [clogem.hub.db.store :as store]
@@ -28,7 +29,7 @@
     (doseq [t [:job/created :job/progress :job/completed :job/failed :job/cancelled]]
       (bus/subscribe! b t #(swap! events conj %)))
     (try (f {:store s :bus b} events)
-         (finally (store/close! s) (bus/stop! b) (fs/delete-tree dir)))))
+         (finally (store/close! s) (bus/stop! b) (support/delete-tree! dir)))))
 
 (deftest a-job-moves-through-its-lifecycle-and-publishes-each-step
   (with-jobs

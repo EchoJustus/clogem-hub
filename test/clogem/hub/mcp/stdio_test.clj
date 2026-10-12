@@ -8,6 +8,7 @@
 
 (ns clogem.hub.mcp.stdio-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
@@ -30,7 +31,7 @@
         system (daemon/start! {:config (test-config dir {}) :runtime-dir (str dir)
                                :clients-file (str (fs/path dir "clients.edn"))})]
     (try (f (assoc system :token (clogem.hub.auth/client-token @(:clients system) "stdio")))
-         (finally (daemon/stop! system) (fs/delete-tree dir)))))
+         (finally (daemon/stop! system) (support/delete-tree! dir)))))
 
 (deftest headers-mirror-the-body
   (is (= {"Content-Type" "application/json" "Accept" "application/json, text/event-stream"
@@ -98,7 +99,7 @@
       (is (nil? (daemon/read-daemon-file path)) "a dead pid is ignored")
       (spit path "[not a map]")
       (is (nil? (daemon/read-daemon-file path)))
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))
 
 (deftest start-failures-leave-nothing-behind
   (let [dir (fs/create-temp-dir {:prefix "clogem-daemon-busy"})
@@ -124,7 +125,7 @@
                                                        :body "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
                                                        :throw false})))
           "the first daemon keeps serving")
-      (finally (daemon/stop! first-system) (fs/delete-tree dir) (fs/delete-tree other-dir)))))
+      (finally (daemon/stop! first-system) (support/delete-tree! dir) (support/delete-tree! other-dir)))))
 
 (deftest daemon-lifecycle
   (with-daemon
@@ -194,7 +195,7 @@
       (finally
         (when-let [info (daemon/read-daemon-file (daemon/daemon-file-path runtime-dir))]
           (some-> (java.lang.ProcessHandle/of (:pid info)) .get .destroyForcibly))
-        (fs/delete-tree base)))))
+        (support/delete-tree! base)))))
 
 (deftest listen-streams-flow-through-the-proxy-as-frames
   ;; The real door: `bb shim` as a child process whose stdin receives frames
@@ -255,4 +256,4 @@
             (when (.isAlive ^java.lang.Process (:proc proc)) (.destroyForcibly ^java.lang.Process (:proc proc)))
             (let [err (slurp (str (fs/path base "shim.err")))]
               (is (every? #(str/starts-with? % "{") (remove str/blank? (str/split-lines err))) (str "stderr is EDN lines only: " err))))))
-      (finally (daemon/stop! system) (fs/delete-tree base)))))
+      (finally (daemon/stop! system) (support/delete-tree! base)))))

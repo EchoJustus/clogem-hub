@@ -12,6 +12,7 @@
    on Windows, where no SIGTERM exists, it is the in-band system_shutdown
    tool. In-process: the tool stops the daemon and only admins see it."
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.edn :as edn]
@@ -88,7 +89,7 @@
       (finally
         (when (.isAlive jproc) (.destroyForcibly jproc))
         (log/set-level! :info)
-        (fs/delete-tree dir)))))
+        (support/delete-tree! dir)))))
 
 (deftest system-shutdown-stops-an-in-process-daemon
   (log/set-level! :error)
@@ -128,4 +129,4 @@
       (finally
         (daemon/stop! system)
         (log/set-level! :info)
-        (fs/delete-tree dir)))))
+        (support/delete-tree! dir)))))

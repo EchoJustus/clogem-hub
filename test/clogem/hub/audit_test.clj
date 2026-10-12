@@ -8,6 +8,7 @@
 
 (ns clogem.hub.audit-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [clogem.hub.audit :as audit]
             [clogem.hub.bus :as bus]
@@ -46,4 +47,4 @@
         (dotimes [i 5] (audit/record! au {:client "c" :profile :gui :method "tools/call" :name (str "t" i) :ok? true}))
         (audit/stop! au)
         (is (= 8 (-> (store/query s "SELECT count(*) AS n FROM audit") first :n))))
-      (finally (store/close! s) (bus/stop! b) (fs/delete-tree dir)))))
+      (finally (store/close! s) (bus/stop! b) (support/delete-tree! dir)))))

@@ -8,6 +8,7 @@
 
 (ns clogem.hub.lock-test
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [babashka.process :as p]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -36,7 +37,7 @@
         (let [h2 (lock/acquire! dir)]
           (is (lock/held? dir) "re-acquirable after release")
           (lock/release! h2)))
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))
 
 (deftest the-holder-pid-falls-back-to-daemon-edn
   ;; on Windows the locked bytes cannot be read by another process; the
@@ -51,7 +52,7 @@
       (spit (str (fs/path dir "daemon.edn")) "[not a map]")
       (fs/delete (lock/lock-path dir))
       (is (nil? (lock/holder-pid (lock/lock-path dir))) "a bad record is ignored")
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))
 
 (deftest the-lock-dies-with-its-process
   (let [dir (str (fs/create-temp-dir {:prefix "clogem-lock-child"}))]
@@ -65,4 +66,4 @@
           (finally (.destroyForcibly ^java.lang.Process (:proc proc))
                    (.waitFor ^java.lang.Process (:proc proc) 10 java.util.concurrent.TimeUnit/SECONDS))))
       (is (not (lock/held? dir)) "the kernel released it when the holder died")
-      (finally (fs/delete-tree dir)))))
+      (finally (support/delete-tree! dir)))))

@@ -9,6 +9,7 @@
 (ns clogem.hub.runtime-test
   "clogem.api end to end: a module's ctx against the real bus and store."
   (:require [babashka.fs :as fs]
+            [clogem.hub.test-support :as support]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [clogem.api :as api]
@@ -41,7 +42,7 @@
         reg (registry/new-registry {:runtime rt :bus b})]
     (runtime/attach-registry! rt reg)
     (try (f reg)
-         (finally (registry/stop-all! reg) (store/close! s) (bus/stop! b) (fs/delete-tree dir)))))
+         (finally (registry/stop-all! reg) (store/close! s) (bus/stop! b) (support/delete-tree! dir)))))
 
 (deftest a-module-reaches-everything-through-clogem-api
   (with-system
