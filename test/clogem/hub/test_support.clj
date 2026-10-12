@@ -15,11 +15,12 @@
    to it: the SQLite pod removes the WAL file when its last connection
    closes, a moment after the writer reported the stop, so a walk can meet
    a file that vanishes under it (NoSuchFileException), and on Windows a
-   file may be held open for a moment longer. Retries for up to two seconds
-   before giving up with the last error."
+   file may be held open for a moment longer, and read-only files (git
+   objects) need `:force`. Retries for up to two seconds before giving up
+   with the last error."
   [dir]
   (loop [attempt 0]
-    (let [result (try (fs/delete-tree dir) ::done
+    (let [result (try (fs/delete-tree dir {:force true}) ::done
                       (catch Exception e
                         (if (and (< attempt 20) (fs/exists? dir))
                           (do (Thread/sleep 100) ::retry)

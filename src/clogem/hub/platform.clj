@@ -46,12 +46,19 @@
   [script]
   (.encodeToString (java.util.Base64/getEncoder) (.getBytes ^String script "UTF-16LE")))
 
+(def ^:private module-path-reset
+  "Windows PowerShell 5.1 autoloads Get-Acl from Microsoft.PowerShell.Security
+   through PSModulePath; a parent that set that variable for PowerShell 7
+   (GitHub's pwsh steps do) makes the 5.1 load fail, so every script first
+   points the path back at the 5.1 module directories."
+  "$env:PSModulePath=\"$PSHOME\\Modules;$env:ProgramFiles\\WindowsPowerShell\\Modules\"\n")
+
 (defn- powershell!
   "Run `script` in the in-box Windows PowerShell; its stdout, or ex-info."
   [script]
   (let [{:keys [exit out err]} (p/shell {:out :string :err :string :continue true}
                                         "powershell" "-NoProfile" "-NonInteractive" "-ExecutionPolicy" "Bypass"
-                                        "-EncodedCommand" (encoded-command script))]
+                                        "-EncodedCommand" (encoded-command (str module-path-reset script)))]
     (if (zero? exit)
       (str out)
       (throw (ex-info (str "powershell failed (" exit "): " (str/trim (str err)))

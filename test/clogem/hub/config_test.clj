@@ -31,9 +31,12 @@
                         (config/validate {:http {:host "127.0.0.1" :port 70000}})))
   (is (map? (config/validate {:http {:host "localhost" :port 1}}))))
 
-(deftest directories-end-in-clogem
-  (doseq [f [config/config-dir config/data-dir config/cache-dir config/runtime-dir]]
-    (is (str/ends-with? (f) (str fs/file-separator "clogem")) (str f))))
+(deftest directories-live-under-clogem
+  ;; config and data end in the clogem folder; cache and runtime are below it on Windows
+  (doseq [f [config/config-dir config/data-dir]]
+    (is (str/ends-with? (f) (str fs/file-separator "clogem")) (str f)))
+  (doseq [f [config/cache-dir config/runtime-dir]]
+    (is (str/includes? (f) (str fs/file-separator "clogem")) (str f))))
 
 (deftest paths-per-platform
   (let [sep fs/file-separator
