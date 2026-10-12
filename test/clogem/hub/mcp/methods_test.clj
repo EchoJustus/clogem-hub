@@ -23,6 +23,7 @@
             [clogem.hub.registry :as registry]
             [clogem.hub.runtime :as runtime]
             [clogem.module.echo.core]
+            [clogem.module.echo.resources]
             [clogem.module.echo.tools]
             [clogem.sdk.manifest :as manifest]))
 
@@ -128,6 +129,79 @@
         (is (= {:mode :fast :kind :video :speed 1.0 :id (parse-uuid uuid)} @seen))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"do not match"
                               (methods/call-tool deps {:name "echo_say" :arguments {:mode "nope" :kind "v" :speed 1 :id uuid}})))))))
+
+(deftest capabilities-depend-on-the-era
+  (is (= {:tools {:listChanged true} :resources {:subscribe true :listChanged true}} (methods/capabilities :modern)))
+  (is (= {:tools {:listChanged false} :resources {:subscribe false :listChanged false}} (methods/capabilities :legacy))
+      "legacy clients have no stream, so initialize promises none"))
+
+(deftest resources-follow-the-spec
+  (let [d (deps)
+        dispatch (methods/dispatcher d)
+        call (fn [id method params] (:response (rpc/handle {:jsonrpc "2.0" :id id :method method :params params} dispatch)))]
+    (clogem.module.echo.resources/reset-history!)
+    (testing "list, templates and cache hints"
+      (let [r (:result (call 1 "resources/list" {}))]
+        (is (= [{:uri "clogem://echo/last/said" :name "last-said" :title "Last echoed text"
+                 :description "The text of the most recent echo_say call, or an empty string." :mimeType "text/plain"}]
+               (:resources r)))
+        (is (= [60000 "private" "complete"] [(:ttlMs r) (:cacheScope r) (:resultType r)])))
+      (is (= ["clogem://echo/history/{n}"] (map :uriTemplate (get-in (call 2 "resources/templates/list" {}) [:result :resourceTemplates]))))
+      (is (= -32602 (get-in (call 3 "resources/list" {:cursor "x"}) [:error :code]))))
+    (testing "read a declared resource, then a template instance"
+      (is (= [{:uri "clogem://echo/last/said" :mimeType "text/plain" :text ""}]
+             (get-in (call 4 "resources/read" {:uri "clogem://echo/last/said"}) [:result :contents])))
+      (methods/call-tool d {:name "echo_say" :arguments {:text "one"}})
+      (methods/call-tool d {:name "echo_say" :arguments {:text "two"}})
+      (is (= "two" (get-in (call 5 "resources/read" {:uri "clogem://echo/last/said"}) [:result :contents 0 :text])))
+      (is (= "one" (get-in (call 6 "resources/read" {:uri "clogem://echo/history/0"}) [:result :contents 0 :text])))
+      (is (= "two" (get-in (call 7 "resources/read" {:uri "clogem://echo/history/1"}) [:result :contents 0 :text]))))
+    (testing "not found is -32602 with the uri, never an empty contents array"
+      (doseq [uri ["clogem://echo/history/9" "clogem://echo/nothing/here" "clogem://other/x/y"]]
+        (let [r (call 8 "resources/read" {:uri uri})]
+          (is (= -32602 (get-in r [:error :code])) uri)
+          (is (= uri (get-in r [:error :data :uri])))))
+      (is (= -32602 (get-in (call 9 "resources/read" {}) [:error :code])) "uri is required"))
+    (testing "a handler that throws is an internal error, not a leak"
+      ;; handlers are resolved when a module registers, so redefine before building deps
+      (with-redefs [clogem.module.echo.resources/last-said (fn [_ _] (throw (ex-info "secret detail" {})))]
+        (let [r (:response (rpc/handle {:jsonrpc "2.0" :id 10 :method "resources/read" :params {:uri "clogem://echo/last/said"}}
+                                       (methods/dispatcher (deps))))]
+          (is (= -32603 (get-in r [:error :code])))
+          (is (not (re-find #"secret" (get-in r [:error :message])))))))
+    (testing "the profile scopes resources like tools"
+      (let [small (methods/dispatcher (assoc d :profile :llm-small))]
+        (is (= [] (get-in (rpc/handle {:jsonrpc "2.0" :id 11 :method "resources/templates/list" :params {}} small) [:response :result :resourceTemplates])))
+        (is (= -32602 (get-in (rpc/handle {:jsonrpc "2.0" :id 12 :method "resources/read" :params {:uri "clogem://echo/history/0"}} small) [:response :error :code])))))))
+
+(deftest listen-filters-are-validated-and-reduced
+  (let [deps (deps)
+        meta {methods/meta-protocol-version "2026-07-28" methods/meta-client-capabilities {}}
+        dispatch (methods/dispatcher deps)
+        listen (fn [notifications] (:response (rpc/handle {:jsonrpc "2.0" :id 1 :method "subscriptions/listen"
+                                                           :params {:notifications notifications :_meta meta}} dispatch)))]
+    (is (= {:toolsListChanged true :resourcesListChanged true :resourceSubscriptions ["clogem://echo/last/said" "clogem://echo/history/2"]}
+           (get-in (listen {:toolsListChanged true :resourcesListChanged true :promptsListChanged true
+                            :resourceSubscriptions ["clogem://echo/last/said" "clogem://nope/x/y" "clogem://echo/history/2" "clogem://echo/last/said"]})
+                   [:result :listen/filter]))
+        "prompts are dropped, unknown URIs are dropped, duplicates collapse, template instances count")
+    (is (= {} (get-in (listen {}) [:result :listen/filter])))
+    (is (= {} (get-in (listen nil) [:result :listen/filter])))
+    (is (= -32602 (get-in (listen {:toolsListChanged "yes"}) [:error :code])))
+    (is (= -32602 (get-in (listen {:resourceSubscriptions "clogem://echo/last/said"}) [:error :code])))
+    (is (= -32602 (get-in (listen [1]) [:error :code])))
+    (is (= -32601 (get-in (rpc/handle {:jsonrpc "2.0" :id 2 :method "subscriptions/listen" :params {}} dispatch) [:response :error :code]))
+        "legacy clients have no stream")
+    (is (methods/listen-result? {:listen/filter {}}))
+    (is (not (methods/listen-result? {:tools []})))))
+
+(deftest template-matching
+  (is (= {:params {:n "3"}} (methods/match-template "clogem://echo/history/{n}" "clogem://echo/history/3")))
+  (is (= {:params {:a "x" :b "y%20z"}} (methods/match-template "clogem://m/k/{a}/{b}" "clogem://m/k/x/y%2520z"))
+      "one decoding step")
+  (is (nil? (methods/match-template "clogem://echo/history/{n}" "clogem://echo/history/3/more")))
+  (is (nil? (methods/match-template "clogem://echo/history/{n}" "clogem://echo/history/")))
+  (is (nil? (methods/match-template "clogem://echo/history/{n}" "clogem://other/history/3"))))
 
 (deftest era-detection
   (is (= :modern (methods/era {:params {:_meta {methods/meta-protocol-version "2026-07-28"}}})))

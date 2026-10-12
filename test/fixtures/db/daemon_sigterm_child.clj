@@ -19,7 +19,7 @@
 (log/set-level! :info)
 (let [[dir n] *command-line-args*
       config (config/load-config {:http {:port 0} :db {:path (str dir "/clogem.db")}})
-      system (daemon/start! {:config config :runtime-dir (str dir "/run")})
+      system (daemon/start! {:config config :runtime-dir (str dir "/run") :clients-file (str dir "/clients.edn")})
       st (:store system)]
   (daemon/install-signal-handlers! system)
   (store/tx! st :hub ["CREATE TABLE IF NOT EXISTS sig_t (id INTEGER PRIMARY KEY, v INTEGER)"])

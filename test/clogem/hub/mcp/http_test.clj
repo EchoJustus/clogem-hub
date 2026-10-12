@@ -10,6 +10,7 @@
   (:require [cheshire.core :as json]
             [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [clogem.hub.auth :as auth]
             [clogem.hub.bus :as bus]
             [clogem.hub.config :as config]
             [clogem.hub.log :as log]
@@ -23,6 +24,10 @@
 
 (def port 7788)
 
+(def clients (auth/generate))
+(def admin-token (auth/client-token clients "admin"))
+(def small-token (auth/client-token clients "llm-small"))
+
 (defn- handler
   ([] (handler #{}))
   ([allowed-origins]
@@ -32,7 +37,7 @@
      (runtime/attach-registry! rt reg)
      (registry/register! reg (manifest/read-manifest (io/resource "clogem/module/system/manifest.edn")))
      (registry/register! reg (manifest/read-manifest (io/resource "clogem/module/echo/manifest.edn")))
-     (http/handler {:registry reg :profile :admin :port port :allowed-origins allowed-origins}))))
+     (http/handler {:registry reg :clients clients :port port :allowed-origins allowed-origins}))))
 
 (def modern-meta
   {"io.modelcontextprotocol/protocolVersion" "2026-07-28"
@@ -43,7 +48,8 @@
   [body & [headers]]
   {:request-method :post :uri "/mcp"
    :headers (merge {"host" (str "127.0.0.1:" port) "content-type" "application/json"
-                    "accept" "application/json, text/event-stream"}
+                    "accept" "application/json, text/event-stream"
+                    "authorization" (str "Bearer " admin-token)}
                    headers)
    :body (if (string? body) body (json/generate-string body))})
 
@@ -139,6 +145,35 @@
       (is (= 415 (:status (h (post "{}" {"content-type" "text/plain"})))))
       (is (= 415 (:status (h (post "{}" {"content-type" "application/json-patch+json"})))) "exact media type")
       (is (= 200 (:status (h (post {:jsonrpc "2.0" :id 1 :method "ping"} {"content-type" "application/json; charset=utf-8"})))) "parameters are fine"))))
+
+(deftest authentication-and-profiles
+  (let [h (handler)]
+    (testing "no token → 401 with WWW-Authenticate and an id-less JSON-RPC error"
+      (let [res (h (post {:jsonrpc "2.0" :id 1 :method "ping"} {"authorization" nil}))]
+        (is (= 401 (:status res)))
+        (is (= http/www-authenticate (get-in res [:headers "WWW-Authenticate"])))
+        (is (nil? (:id (body-of res))))
+        (is (= -32600 (get-in (body-of res) [:error :code])))))
+    (testing "wrong token, wrong scheme → 401"
+      (is (= 401 (:status (h (post {:jsonrpc "2.0" :id 1 :method "ping"} {"authorization" "Bearer nope"})))))
+      (is (= 401 (:status (h (post {:jsonrpc "2.0" :id 1 :method "ping"} {"authorization" (str "Basic " admin-token)}))))))
+    (testing "authentication precedes content-type and body checks"
+      (is (= 401 (:status (h (post "{nope" {"authorization" nil "content-type" "text/plain"}))))))
+    (testing "the token's profile scopes list and call"
+      (let [res (h (post {:jsonrpc "2.0" :id 2 :method "tools/list" :params {:_meta modern-meta}}
+                         (assoc (modern-headers "tools/list") "authorization" (str "Bearer " small-token))))]
+        (is (= ["echo_say" "system_health"] (mapv :name (get-in (body-of res) [:result :tools])))))
+      (let [res (h (post {:jsonrpc "2.0" :id 3 :method "tools/call" :params {:name "system_list_modules" :arguments {} :_meta modern-meta}}
+                         (assoc (modern-headers "tools/call" "system_list_modules") "authorization" (str "Bearer " small-token))))]
+        (is (= -32602 (get-in (body-of res) [:error :code])) "a tool outside the profile does not exist for it")))
+    (testing "resources follow the same profile rule"
+      (let [res (h (post {:jsonrpc "2.0" :id 4 :method "resources/templates/list" :params {:_meta modern-meta}}
+                         (assoc (modern-headers "resources/templates/list") "authorization" (str "Bearer " small-token))))]
+        (is (= [] (get-in (body-of res) [:result :resourceTemplates]))))
+      (let [res (h (post {:jsonrpc "2.0" :id 5 :method "resources/read" :params {:uri "clogem://echo/last/said" :_meta modern-meta}}
+                         (modern-headers "resources/read" "clogem://echo/last/said")))]
+        (is (= 200 (:status res)))
+        (is (= "text/plain" (get-in (body-of res) [:result :contents 0 :mimeType])))))))
 
 (deftest header-helpers
   (is (http/host-ok? "127.0.0.1:7788" 7788))

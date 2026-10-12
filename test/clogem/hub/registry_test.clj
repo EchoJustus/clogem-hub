@@ -75,8 +75,15 @@
         (is (= [1 2] (map :tools (:modules result)))))
       (let [{:keys [handler ctx]} (registry/find-tool reg :admin "echo_say")]
         (is (= {:text "HI"} (handler ctx {:text "hi" :upcase true})))))
-    (testing "resource index is empty but well-formed"
-      (is (= {:resources {} :templates []} (registry/resource-index reg :admin))))
+    (testing "resource index: echo's resource and template, filtered by profile"
+      (let [idx (registry/resource-index reg :admin)]
+        (is (= ["clogem://echo/last/said"] (keys (:resources idx))))
+        (is (= ["clogem://echo/history/{n}"] (map (comp :uri-template :template) (:templates idx))))
+        (is (fn? (get-in idx [:resources "clogem://echo/last/said" :handler]))))
+      (is (= {:resources {} :templates []} (-> (registry/resource-index reg :llm-small)
+                                               (update :resources #(dissoc % "clogem://echo/last/said"))))
+          ":llm-small sees the resource but not the template")
+      (is (empty? (:templates (registry/resource-index reg :llm-small)))))
     (testing "change events were published on the bus in order"
       (is (wait-for #(= 2 (count @events)) 2000))
       (is (= [[:registered :system :ready] [:registered :echo :ready]]

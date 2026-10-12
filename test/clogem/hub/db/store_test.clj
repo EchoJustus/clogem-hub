@@ -38,8 +38,9 @@
     (fn [s b dir]
       (is (fs/exists? (:path s)))
       (is (= [{:journal_mode "wal"}] (sqlite/query (:path s) "PRAGMA journal_mode")) "WAL persists in the file")
-      (is (= [{:module "hub" :version 1 :name "0001-jobs.sql"}]
+      (is (= [{:module "hub" :version 1 :name "0001-jobs.sql"} {:module "hub" :version 2 :name "0002-audit.sql"}]
              (store/query s "SELECT module, version, name FROM schema_migrations ORDER BY module, version")))
+      (is (= [{:name "audit"}] (store/query s "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'audit'")))
       (is (= [{:name "jobs"}] (store/query s "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'jobs'")))
       (is (= [:db/tx] (bus/owners b)) "the writer owns :db/tx")
       (is (or (nil? (:fstype s)) (string? (:fstype s))))
@@ -47,11 +48,11 @@
         (let [b2 (bus/new-bus)
               s2 (store/open! {:path (str (fs/path dir "second.db")) :bus b2})]
           (try
-            (is (= 1 (count-of s2 "schema_migrations")))
+            (is (= 2 (count-of s2 "schema_migrations")))
             (store/close! s2)
             (let [s3 (store/open! {:path (str (fs/path dir "second.db")) :bus b2})]
-              (is (= 1 (count-of s3 "schema_migrations")))
-              (is (= {:module :hub :applied [] :current 1}
+              (is (= 2 (count-of s3 "schema_migrations")))
+              (is (= {:module :hub :applied [] :current 2}
                      (migrate/migrate! {:db (:path s3) :submit #(writer/submit! (:writer s3) %)} :hub store/hub-migrations)))
               (store/close! s3))
             (finally (bus/stop! b2)))))
@@ -124,7 +125,7 @@
             "a trailing line comment and a ';' or '?' inside a literal are fine")
         (is (= [{:v "a; b /* not a comment */ ?"}] (store/query s ["SELECT v FROM echo_items WHERE k = ?" "cmt"]))))
       (let [st (writer/stats (:writer s))]
-        (is (= 6 (:committed st)))
+        (is (= 7 (:committed st)))
         (is (= 2 (:failed st)))))))
 
 (deftest queries-are-single-read-only-statements
@@ -243,7 +244,7 @@
         (is (= 1000 (count-of s "echo_c")) "exactly one row per request")
         (is (= [{:n 1000}] (store/query s "SELECT count(DISTINCT v) AS n FROM echo_c")))
         (is (= busy-before (:busy (sqlite/stats))) "zero SQLITE_BUSY")
-        (is (= 1002 (:committed (writer/stats (:writer s)))) "hub migration + CREATE TABLE + 1000")
+        (is (= 1003 (:committed (writer/stats (:writer s)))) "two hub migrations + CREATE TABLE + 1000")
         (log/info {:msg "1000 concurrent transactions" :ms ms})
         (is (< ms 60000))))))
 
