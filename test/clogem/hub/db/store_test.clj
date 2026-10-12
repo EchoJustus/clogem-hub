@@ -59,16 +59,24 @@
       (is (= #{:path :fstype :writer} (set (keys (store/stats s))))))))
 
 (deftest unsafe-paths-are-refused
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Windows mount" (store/check-path! "/mnt/d/media/clogem.db")))
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Windows mount"
-                        (store/check-path! (str (fs/path (System/getProperty "user.home") "RUN" "clogem.db")))))
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"9p"
-                        (with-redefs [store/filesystem-type (constantly "9p")] (store/check-path! "/tmp/x/clogem.db"))))
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"drvfs"
-                        (with-redefs [store/filesystem-type (constantly "drvfs")] (store/check-path! "/tmp/x/clogem.db"))))
-  (is (nil? (with-redefs [store/filesystem-type (constantly nil)] (store/check-path! "/tmp/x/clogem.db")))
-      "an unknown filesystem type is allowed with a warning")
-  (is (= "ext4" (with-redefs [store/filesystem-type (constantly "ext4")] (store/check-path! "/tmp/x/clogem.db")))))
+  (letfn [(windows [m] (fn [p] (merge {:os :windows :path (str p)} m)))
+          (posix [t] (fn [p] {:os :posix :path (str p) :fstype t}))]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"UNC"
+                          (with-redefs [store/volume-info (windows {:drive-type "Fixed" :fstype "NTFS"})] (store/check-path! "\\\\nas\\media\\clogem.db"))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Network drive"
+                          (with-redefs [store/volume-info (windows {:drive-type "Network" :fstype "NTFS"})] (store/check-path! "Z:\\clogem.db"))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"FAT32"
+                          (with-redefs [store/volume-info (windows {:drive-type "Fixed" :fstype "FAT32"})] (store/check-path! "E:\\clogem.db"))))
+    (is (= "NTFS" (with-redefs [store/volume-info (windows {:drive-type "Fixed" :fstype "NTFS"})] (store/check-path! "C:\\x\\clogem.db"))))
+    (is (= :unsafe-filesystem (:type (try (with-redefs [store/volume-info (posix "9p")] (store/check-path! "/mnt/d/x/clogem.db"))
+                                          (catch clojure.lang.ExceptionInfo e (ex-data e))))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"drvfs"
+                          (with-redefs [store/volume-info (posix "drvfs")] (store/check-path! "/tmp/x/clogem.db"))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"cifs"
+                          (with-redefs [store/volume-info (posix "cifs")] (store/check-path! "/net/x/clogem.db"))))
+    (is (nil? (with-redefs [store/volume-info (posix nil)] (store/check-path! "/tmp/x/clogem.db")))
+        "an unknown filesystem type is allowed with a warning")
+    (is (= "ext4" (with-redefs [store/volume-info (posix "ext4")] (store/check-path! "/tmp/x/clogem.db"))))))
 
 (deftest transactions-run-through-the-single-writer
   (with-store

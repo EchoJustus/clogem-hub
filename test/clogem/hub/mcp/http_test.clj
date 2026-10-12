@@ -69,7 +69,7 @@
     (let [res (h (post {:jsonrpc "2.0" :id 2 :method "tools/list" :params {:_meta modern-meta}}
                        (modern-headers "tools/list")))]
       (is (= 200 (:status res)))
-      (is (= ["echo_say" "system_health" "system_list_modules"] (mapv :name (get-in (body-of res) [:result :tools])))))
+      (is (= ["echo_say" "system_health" "system_list_modules" "system_shutdown"] (mapv :name (get-in (body-of res) [:result :tools])))))
     (let [res (h (post {:jsonrpc "2.0" :id 3 :method "tools/call"
                         :params {:name "system_health" :arguments {} :_meta modern-meta}}
                        (modern-headers "tools/call" "system_health")))]

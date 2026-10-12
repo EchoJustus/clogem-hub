@@ -41,7 +41,16 @@
                                              [:description :string]]]]]
                 :annotations {:readOnlyHint true :idempotentHint true}
                 :meta {}
-                :profiles #{:gui :llm-large :admin}}]
+                :profiles #{:gui :llm-large :admin}}
+               {:name "system_shutdown"
+                :title "Stop the hub"
+                :description "Stop this user's hub daemon gracefully: open listen streams are completed, queued transactions are committed, then the process exits. Use it before an update or when the hub must be restarted; every client loses its connection and the stdio proxy starts a daemon again on demand. Admin clients only; asks the user to confirm."
+                :handler clogem.module.system.tools/shutdown
+                :input [:map {:closed true}]
+                :output [:map [:stopping :boolean] [:pid :int]]
+                :annotations {:readOnlyHint false :destructiveHint true :idempotentHint true}
+                :meta {"anthropic/requiresUserInteraction" true}
+                :profiles #{:admin}}]
        :resources []
        :resource-templates []
        :prompts []}

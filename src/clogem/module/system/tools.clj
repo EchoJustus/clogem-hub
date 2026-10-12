@@ -28,3 +28,9 @@
   "system_list_modules: every loaded module with version, status and tool count."
   [ctx _args]
   (reply ctx {:command :system/modules}))
+
+(defn shutdown
+  "system_shutdown: ask the daemon to stop gracefully (admin clients only).
+   The daemon replies first and stops a moment later, so the reply arrives."
+  [ctx _args]
+  (reply ctx {:command :system/shutdown}))

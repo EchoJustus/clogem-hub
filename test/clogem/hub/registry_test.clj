@@ -58,7 +58,7 @@
                                   {:id :system :status :ready :reason nil}]}
            (registry/status reg)))
     (testing "tools per profile, ordered by module id then tool name"
-      (is (= ["echo_say" "system_health" "system_list_modules"]
+      (is (= ["echo_say" "system_health" "system_list_modules" "system_shutdown"]
              (map (comp :name :tool) (registry/tools-for reg :admin))))
       (is (= ["echo_say" "system_health"]
              (map (comp :name :tool) (registry/tools-for reg :llm-small)))
@@ -72,7 +72,7 @@
       (let [{:keys [handler ctx]} (registry/find-tool reg :admin "system_list_modules")
             result (handler ctx {})]
         (is (= ["echo" "system"] (map :id (:modules result))))
-        (is (= [1 2] (map :tools (:modules result)))))
+        (is (= [1 3] (map :tools (:modules result)))))
       (let [{:keys [handler ctx]} (registry/find-tool reg :admin "echo_say")]
         (is (= {:text "HI"} (handler ctx {:text "hi" :upcase true})))))
     (testing "resource index: echo's resource and template, filtered by profile"
@@ -138,7 +138,7 @@
         (is (= :invalid-manifest (get-in e [:reason :type])))))
     (is (= [:system] (registry/module-ids reg)))
     (is (= :ok (:status (registry/status reg))))
-    (is (= ["system_health" "system_list_modules"] (map (comp :name :tool) (registry/tools-for reg :admin))))
+    (is (= ["system_health" "system_list_modules" "system_shutdown"] (map (comp :name :tool) (registry/tools-for reg :admin))))
     (is (= ["system"] (map :id (registry/manifest-summaries reg))))))
 
 (deftest replacing-and-failing-modules-are-stopped
@@ -183,7 +183,7 @@
       (is (= :unavailable (:status e)))
       (is (= {:type :before-start-failed :message "migration broke"} (:reason e))))
     (is (= [:system :echo] @calls) "the hook runs once per registration, before start")
-    (is (= ["system_health" "system_list_modules"] (map (comp :name :tool) (registry/tools-for reg :admin))))))
+    (is (= ["system_health" "system_list_modules" "system_shutdown"] (map (comp :name :tool) (registry/tools-for reg :admin))))))
 
 (deftest runtime-operations-without-a-database-fail-clearly
   (let [reg (fresh-registry (atom []))

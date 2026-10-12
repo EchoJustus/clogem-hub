@@ -9,7 +9,7 @@
 (ns clogem.hub.config-test
   (:require [babashka.fs :as fs]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [clogem.hub.config :as config]))
 
 (deftest defaults-bind-loopback-on-7788
@@ -30,9 +30,44 @@
                         (config/validate {:http {:host "127.0.0.1" :port 70000}})))
   (is (map? (config/validate {:http {:host "localhost" :port 1}}))))
 
-(deftest xdg-paths-end-in-clogem
+(deftest directories-end-in-clogem
   (doseq [f [config/config-dir config/data-dir config/cache-dir config/runtime-dir]]
-    (is (str/ends-with? (f) "/clogem") (str f))))
+    (is (str/ends-with? (f) (str fs/file-separator "clogem")) (str f))))
+
+(deftest paths-per-platform
+  (let [sep fs/file-separator
+        j (fn [& parts] (str/join sep parts))]
+    (testing "Windows defaults under %LOCALAPPDATA%"
+      (let [p (config/paths {:env {"LOCALAPPDATA" (j "C:" "Users" "ann" "AppData" "Local")} :windows? true
+                             :home (j "C:" "Users" "ann") :tmpdir (j "C:" "Temp") :user "ann"})]
+        (is (= (j "C:" "Users" "ann" "AppData" "Local" "clogem") (:config p)))
+        (is (= (:config p) (:data p)) "config and data share the folder")
+        (is (= (j "C:" "Users" "ann" "AppData" "Local" "clogem" "cache") (:cache p)))
+        (is (= (j "C:" "Users" "ann" "AppData" "Local" "clogem" "run") (:runtime p)))
+        (is (nil? (:shared p)))))
+    (testing "Windows without the variable falls back to the profile"
+      (is (= (j "C:" "Users" "ann" "AppData" "Local" "clogem")
+             (:config (config/paths {:env {} :windows? true :home (j "C:" "Users" "ann") :tmpdir "t" :user "ann"})))))
+    (testing "POSIX defaults are the XDG layout"
+      (let [p (config/paths {:env {} :windows? false :home (j "" "home" "ann") :tmpdir (j "" "tmp") :user "ann"})]
+        (is (= (j "" "home" "ann" ".config" "clogem") (:config p)))
+        (is (= (j "" "home" "ann" ".local" "share" "clogem") (:data p)))
+        (is (= (j "" "home" "ann" ".cache" "clogem") (:cache p)))
+        (is (= (j "" "tmp" "clogem-ann" "clogem") (:runtime p)))))
+    (testing "explicit variables win on both platforms"
+      (doseq [w [true false]]
+        (let [p (config/paths {:env {"CLOGEM_CONFIG_DIR" (j "x" "cfg") "XDG_DATA_HOME" (j "x" "data") "XDG_CACHE_HOME" (j "x" "cache")
+                                     "XDG_RUNTIME_DIR" (j "x" "run") "CLOGEM_SHARED_DIR" (j "x" "shared")
+                                     "LOCALAPPDATA" (j "C:" "l")}
+                               :windows? w :home "h" :tmpdir "t" :user "u"})]
+          (is (= (j "x" "cfg") (:config p)) (str w))
+          (is (= (j "x" "data" "clogem") (:data p)))
+          (is (= (j "x" "cache" "clogem") (:cache p)))
+          (is (= (j "x" "run" "clogem") (:runtime p)))
+          (is (= (j "x" "shared") (:shared p))))))
+    (is (= "/elsewhere" (config/shared-dir {:shared-dir "/elsewhere"})) "the configuration names the shared directory")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shared-dir"
+                          (config/validate (assoc config/defaults :shared-dir " "))))))
 
 (deftest edn-files-are-read-safely
   (let [dir (fs/create-temp-dir {:prefix "clogem-config"})]

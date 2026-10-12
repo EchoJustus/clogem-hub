@@ -10,17 +10,24 @@
   "The single-instance lock: one clogem-hub daemon per OS user (PD-1).
 
    `daemon.lock` in the runtime directory is locked with an OS file lock
-   (fcntl through java.nio) for the daemon's lifetime; a second daemon's
-   `tryLock` fails and it refuses to start. The kernel releases the lock when
-   the holder dies, however it dies, so a stale lock file is never a problem
-   and the file is left in place. The holder's pid is written into the file
-   for diagnostics only; `daemon.edn` remains the record other doors read.
+   (java.nio `tryLock`: LockFileEx on Windows, fcntl on POSIX) for the
+   daemon's lifetime; a second daemon's `tryLock` fails and it refuses to
+   start. The OS releases the lock when the holder dies, however it dies, so
+   a stale lock file is never a problem and the file is left in place. The
+   holder's pid is written into the file for diagnostics only; `daemon.edn`
+   remains the record other doors read.
 
-   POSIX pitfall honoured here: closing any descriptor of a file releases
-   every fcntl lock this process holds on it. So the handles this process
-   holds are remembered in `held`, and neither `acquire!` nor `held?` ever
-   opens a second descriptor on a file this process already locks."
+   Two platform facts shape this namespace (ADR-0006):
+   - POSIX: closing any descriptor of a file releases every fcntl lock this
+     process holds on it. So the handles this process holds are remembered
+     in `held`, and neither `acquire!` nor `held?` ever opens a second
+     descriptor on a file this process already locks.
+   - Windows: the lock is mandatory. Another process can open the file (the
+     probe in `held?` works) but cannot read the locked bytes, so the pid
+     comes from `daemon.edn` in the same directory when the file cannot be
+     read; nor can the file be deleted while it is held."
   (:require [babashka.fs :as fs]
+            [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (defonce ^{:doc "Absolute lock path → handle, for the locks this process holds."}
@@ -31,15 +38,26 @@
   [dir]
   (str (fs/path dir "daemon.lock")))
 
+(defn- recorded-pid
+  "The pid `daemon.edn` next to the lock records, or nil."
+  [path]
+  (try (let [f (fs/path (fs/parent (fs/absolutize (str path))) "daemon.edn")
+             v (when (fs/exists? f) (edn/read-string {:eof nil} (slurp (str f))))]
+         (when (map? v) (let [pid (:pid v)] (when (integer? pid) pid))))
+       (catch Exception _ nil)))
+
 (defn holder-pid
-  "The pid written by the current or last holder, or nil. When this process
-   holds the lock the pid comes from memory: reading the file would open and
-   close a descriptor, which on POSIX releases this process's own lock."
+  "The pid of the current or last holder, or nil. When this process holds
+   the lock the pid comes from memory: reading the file would open and close
+   a descriptor, which on POSIX releases this process's own lock. Another
+   holder's pid is read from the file, or, when the OS refuses the read
+   (Windows locks are mandatory), from daemon.edn next to it."
   [path]
   (if-let [h (get @held (str (fs/absolutize (str path))))]
     (:pid h)
-    (try (some-> (slurp (str path)) str/trim not-empty parse-long)
-         (catch Exception _ nil))))
+    (or (try (some-> (slurp (str path)) str/trim not-empty parse-long)
+             (catch Exception _ nil))
+        (recorded-pid path))))
 
 (defn- try-lock
   "The FileLock, or nil when another process (or this one) holds it."

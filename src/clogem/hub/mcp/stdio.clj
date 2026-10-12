@@ -20,10 +20,10 @@
    as frames until the client cancels it (`notifications/cancelled` with that
    request id) or the daemon ends it; if the stream ends without the listen
    result, the proxy emits the `notifications/cancelled` the stdio transport
-   requires. When no daemon answers, the proxy starts one (`systemctl --user
-   start clogem-hub` when that unit is enabled, else `bb daemon` detached) and
-   waits for daemon.edn. stdout carries frames only; everything else goes to
-   stderr through clogem.hub.log."
+   requires. When no daemon answers, the proxy starts one (`bb daemon`
+   detached, run by the Babashka binary of this proxy) and waits for
+   daemon.edn. stdout carries frames only; everything else goes to stderr
+   through clogem.hub.log."
   (:require [babashka.fs :as fs]
             [babashka.http-client :as http]
             [babashka.process :as p]
@@ -35,7 +35,8 @@
             [clogem.hub.log :as log]
             [clogem.hub.mcp.http :as mcp-http]
             [clogem.hub.mcp.jsonrpc :as rpc]
-            [clogem.hub.mcp.methods :as methods]))
+            [clogem.hub.mcp.methods :as methods]
+            [clogem.hub.platform :as platform]))
 
 ;; ---------------------------------------------------------------------------
 ;; Finding (or starting) the daemon
@@ -68,29 +69,21 @@
   []
   (some-> (System/getProperty "babashka.config") fs/absolutize fs/parent str))
 
-(defn- unit-enabled? []
-  (try (zero? (:exit (p/shell {:out :string :err :string :continue true}
-                              "systemctl" "--user" "is-enabled" "clogem-hub")))
-       (catch Exception _ false)))
-
 (defn start-daemon!
-  "Start a daemon for this user without waiting for it: through systemd when
-   the unit is enabled (and `:systemd?` is not false), else as a detached
-   `bb daemon` whose stderr goes to <runtime-dir>/daemon.log (its stdout is
+  "Start a daemon for this user without waiting for it: a detached
+   `bb daemon` run by the Babashka binary of this proxy (the packaged bb on
+   Windows), whose stderr goes to <runtime-dir>/daemon.log (its stdout is
    empty by design). `:extra-env` reaches the spawned daemon (tests point it
-   at temporary XDG directories). Returns how it was started."
-  [{:keys [runtime-dir extra-env systemd?] :or {systemd? true}}]
-  (if (and systemd? (unit-enabled?))
-    (do (p/shell {:out :string :err :string :continue true} "systemctl" "--user" "start" "clogem-hub")
-        :systemd)
-    (let [dir (or runtime-dir (config/runtime-dir))
-          hub (or (hub-dir) (throw (ex-info "cannot locate the hub checkout to start a daemon" {:type :no-hub-dir})))
-          log-file (fs/file (fs/path dir "daemon.log"))]
-      (fs/create-dirs dir)
-      (p/process (cond-> {:dir hub :out :discard :err log-file}
-                   (seq extra-env) (assoc :extra-env extra-env))
-                 "bb" "--config" (str (fs/path hub "bb.edn")) "daemon")
-      :spawned)))
+   at temporary directories). Returns how it was started."
+  [{:keys [runtime-dir extra-env]}]
+  (let [dir (or runtime-dir (config/runtime-dir))
+        hub (or (hub-dir) (throw (ex-info "cannot locate the hub checkout to start a daemon" {:type :no-hub-dir})))
+        log-file (fs/file (fs/path dir "daemon.log"))]
+    (fs/create-dirs dir)
+    (p/process (cond-> {:dir hub :out :discard :err log-file}
+                 (seq extra-env) (assoc :extra-env extra-env))
+               (platform/current-binary) "--config" (str (fs/path hub "bb.edn")) "daemon")
+    :spawned))
 
 (defn ensure-daemon!
   "The endpoint of a reachable daemon, starting one when allowed

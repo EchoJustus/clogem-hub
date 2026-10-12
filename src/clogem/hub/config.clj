@@ -7,21 +7,29 @@
 ;; SPDX-License-Identifier: EPL-2.0
 
 (ns clogem.hub.config
-  "Daemon configuration and XDG paths.
+  "Daemon configuration and directories (ADR-0006).
 
-   config:  ~/.config/clogem/      config.edn, modules.edn, clients.edn (0600)
-   data:    ~/.local/share/clogem/ clogem.db, artifacts/
-   cache:   ~/.cache/clogem/
-   runtime: $XDG_RUNTIME_DIR/clogem/  daemon.edn, daemon.lock, nREPL port
+   Windows (the product platform):
+     config + data:  %LOCALAPPDATA%\\clogem\\       config.edn, modules.edn, clients.edn, clogem.db, artifacts\\
+     cache:          %LOCALAPPDATA%\\clogem\\cache\\
+     runtime:        %LOCALAPPDATA%\\clogem\\run\\   daemon.edn, daemon.lock, nREPL port, daemon.log
+     shared:         the publisher cache folder when packaged (CLOGEM_SHARED_DIR
+                     or `:shared-dir`): a copy of daemon.edn and one token file
+                     per client for the other packages of the same publisher
+   POSIX (development and CI):
+     config ~/.config/clogem/, data ~/.local/share/clogem/, cache ~/.cache/clogem/,
+     runtime $XDG_RUNTIME_DIR/clogem/ (or a per-user temp directory)
 
-   config.edn is read with clojure.edn (no eval). Environment overrides:
-   CLOGEM_CONFIG_DIR, CLOGEM_PORT. The HTTP listener is validated to be a
-   loopback address (PD-9): anything else is rejected. The database lives
-   at `:db :path` (default <data-dir>/clogem.db); the store refuses paths
-   on Windows mounts (PD-10)."
+   Overrides on either platform: CLOGEM_CONFIG_DIR, CLOGEM_SHARED_DIR, the
+   XDG_* variables (what the Linux test runs use), CLOGEM_PORT. config.edn is
+   read with clojure.edn (no eval). The HTTP listener is validated to be a
+   loopback address (PD-9). The database lives at `:db :path` (default
+   <data-dir>/clogem.db); the store refuses network, removable and non-NTFS
+   volumes (PD-10, clogem.hub.platform)."
   (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clogem.hub.platform :as platform]))
 
 (def hub-version "0.1.0")
 
@@ -37,7 +45,8 @@
         :queue 256                      ; bounded writer queue
         :call-timeout-ms 30000          ; watchdog per pod call
         :tx-timeout-ms 60000}           ; wait for queue room plus reply
-   :auth {:clients-file nil}            ; nil → <config-dir>/clients.edn (mode 0600)
+   :auth {:clients-file nil}            ; nil → <config-dir>/clients.edn (owner-only)
+   :shared-dir nil                      ; publisher cache folder (packaged hub), or nil
    :profiles {:llm-small {:max-tools 10}} ; a small model sees at most this many tools
    :audit {:queue 256}                  ; bounded audit queue (one writer thread)
    :subscriptions {:keepalive-ms 15000  ; SSE comment line on quiet listen streams
@@ -49,28 +58,45 @@
 
 (def loopback-hosts #{"127.0.0.1" "::1" "localhost"})
 
-(defn- env [k] (not-empty (System/getenv k)))
-
 (defn home [] (System/getProperty "user.home"))
 
-(defn- xdg [var default-rel]
-  (or (env var) (str (fs/path (home) default-rel))))
+(defn paths
+  "The hub directories for an environment, pure: {:config :data :cache
+   :runtime :shared} from {:env {\"VAR\" \"value\"} :windows? bool :home
+   :tmpdir :user}. Explicit variables win on either platform; the platform
+   decides the defaults."
+  [{:keys [env windows? home tmpdir user]}]
+  (let [e (fn [k] (not-empty (get env k)))
+        base (str (fs/path (platform/local-app-data env home) "clogem"))
+        xdg (fn [var] (some-> (e var) (fs/path "clogem") str))]
+    {:config (or (e "CLOGEM_CONFIG_DIR") (xdg "XDG_CONFIG_HOME")
+                 (if windows? base (str (fs/path home ".config" "clogem"))))
+     :data (or (xdg "XDG_DATA_HOME")
+               (if windows? base (str (fs/path home ".local" "share" "clogem"))))
+     :cache (or (xdg "XDG_CACHE_HOME")
+                (if windows? (str (fs/path base "cache")) (str (fs/path home ".cache" "clogem"))))
+     :runtime (or (xdg "XDG_RUNTIME_DIR")
+                  (if windows?
+                    (str (fs/path base "run"))
+                    (str (fs/path tmpdir (str "clogem-" user) "clogem"))))
+     :shared (e "CLOGEM_SHARED_DIR")}))
 
-(defn config-dir []
-  (or (env "CLOGEM_CONFIG_DIR") (str (fs/path (xdg "XDG_CONFIG_HOME" ".config") "clogem"))))
+(defn current-paths
+  "`paths` for this process."
+  []
+  (paths {:env (System/getenv) :windows? (platform/windows?) :home (home)
+          :tmpdir (System/getProperty "java.io.tmpdir") :user (System/getProperty "user.name")}))
 
-(defn data-dir [] (str (fs/path (xdg "XDG_DATA_HOME" ".local/share") "clogem")))
+(defn config-dir [] (:config (current-paths)))
 
-(defn cache-dir [] (str (fs/path (xdg "XDG_CACHE_HOME" ".cache") "clogem")))
+(defn data-dir [] (:data (current-paths)))
+
+(defn cache-dir [] (:cache (current-paths)))
 
 (defn runtime-dir
-  "$XDG_RUNTIME_DIR/clogem, or a per-user directory under the system temp
-   directory when XDG_RUNTIME_DIR is unset (containers, CI)."
+  "Where daemon.edn, daemon.lock and daemon.log live (see `paths`)."
   []
-  (let [base (or (env "XDG_RUNTIME_DIR")
-                 (str (fs/path (System/getProperty "java.io.tmpdir")
-                               (str "clogem-" (System/getProperty "user.name")))))]
-    (str (fs/path base "clogem"))))
+  (:runtime (current-paths)))
 
 (defn config-file [] (str (fs/path (config-dir) "config.edn")))
 
@@ -83,6 +109,12 @@
   "The per-client token file: `:auth :clients-file` or <config-dir>/clients.edn."
   [config]
   (or (get-in config [:auth :clients-file]) (str (fs/path (config-dir) "clients.edn"))))
+
+(defn shared-dir
+  "The publisher cache folder other packages read, or nil: `:shared-dir`
+   from the configuration, else CLOGEM_SHARED_DIR."
+  [config]
+  (or (:shared-dir config) (:shared (current-paths))))
 
 (defn read-edn-file
   "The EDN map in `path`, or nil when the file is absent or not a map."
@@ -126,6 +158,9 @@
     (let [f (get-in config [:auth :clients-file])]
       (when-not (or (nil? f) (and (string? f) (not (str/blank? f))))
         (throw (ex-info (str "auth clients-file must be a non-blank string or nil, got " (pr-str f)) {}))))
+    (let [d (:shared-dir config)]
+      (when-not (or (nil? d) (and (string? d) (not (str/blank? d))))
+        (throw (ex-info (str "shared-dir must be a non-blank string or nil, got " (pr-str d)) {}))))
     (doseq [[profile {:keys [max-tools]}] (:profiles config)]
       (when-not (and (integer? max-tools) (pos? max-tools))
         (throw (ex-info (str "profiles " (name profile) " max-tools must be a positive integer, got " (pr-str max-tools)) {}))))
@@ -150,5 +185,5 @@
   ([] (load-config {}))
   ([overrides]
    (let [from-file (read-edn-file (config-file))
-         from-env (when-let [p (some-> (env "CLOGEM_PORT") parse-port)] {:http {:port p}})]
+         from-env (when-let [p (some-> (not-empty (System/getenv "CLOGEM_PORT")) parse-port)] {:http {:port p}})]
      (validate (reduce deep-merge defaults [from-file overrides from-env])))))

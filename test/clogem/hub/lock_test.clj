@@ -38,6 +38,21 @@
           (lock/release! h2)))
       (finally (fs/delete-tree dir)))))
 
+(deftest the-holder-pid-falls-back-to-daemon-edn
+  ;; on Windows the locked bytes cannot be read by another process; the
+  ;; record next to the lock answers instead
+  (let [dir (str (fs/create-temp-dir {:prefix "clogem-lock-pid"}))]
+    (try
+      (is (nil? (lock/holder-pid (lock/lock-path dir))) "no lock, no record")
+      (spit (str (fs/path dir "daemon.edn")) (pr-str {:pid 4242 :port 1}))
+      (is (= 4242 (lock/holder-pid (lock/lock-path dir))) "an unreadable or missing lock file defers to daemon.edn")
+      (spit (lock/lock-path dir) "77\n")
+      (is (= 77 (lock/holder-pid (lock/lock-path dir))) "a readable lock file wins")
+      (spit (str (fs/path dir "daemon.edn")) "[not a map]")
+      (fs/delete (lock/lock-path dir))
+      (is (nil? (lock/holder-pid (lock/lock-path dir))) "a bad record is ignored")
+      (finally (fs/delete-tree dir)))))
+
 (deftest the-lock-dies-with-its-process
   (let [dir (str (fs/create-temp-dir {:prefix "clogem-lock-child"}))]
     (try

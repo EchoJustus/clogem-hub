@@ -17,7 +17,8 @@
             [clogem.hub.lock]
             [clogem.hub.daemon :as daemon]
             [clogem.hub.log :as log]
-            [clogem.hub.mcp.stdio :as stdio]))
+            [clogem.hub.mcp.stdio :as stdio]
+            [clogem.hub.platform :as platform]))
 
 (use-fixtures :once (fn [f] (log/set-level! :error) (try (f) (finally (log/set-level! :info)))))
 
@@ -136,12 +137,12 @@
         (is (pos? (:pid info)))
         (is (= (:path store) (:db info)) "daemon.edn names the database"))
       (is (fs/exists? (:path store)))
-      (is (= [:db/tx :system/health :system/modules] (clogem.hub.bus/owners bus)))
+      (is (= [:db/tx :system/health :system/modules :system/shutdown] (clogem.hub.bus/owners bus)))
       (is (= [:system] (clogem.hub.registry/module-ids registry)))
       (let [info (clojure.edn/read-string (slurp daemon-file))]
         (is (= (clogem.hub.lock/lock-path (fs/parent daemon-file)) (:lock info)) "daemon.edn names the lock")
         (is (fs/exists? (:clients-file info)) "daemon.edn names the clients file it created")
-        (is (clogem.hub.auth/secure-permissions? (:clients-file info)) "clients.edn is 0600")))))
+        (is (clogem.hub.auth/secure-permissions? (:clients-file info)) "clients.edn is owner-only")))))
 
 (deftest the-proxy-starts-a-daemon-when-none-answers
   ;; The spawned daemon runs `bb daemon` from this checkout with its XDG
@@ -161,7 +162,7 @@
     (spit (str (fs/path config-dir "config.edn")) (pr-str {:http {:port 0}}))
     (try
       (is (nil? (daemon/read-daemon-file (daemon/daemon-file-path runtime-dir))) "no daemon yet")
-      (let [url (stdio/ensure-daemon! config {:runtime-dir runtime-dir :systemd? false :extra-env extra-env})
+      (let [url (stdio/ensure-daemon! config {:runtime-dir runtime-dir :extra-env extra-env})
             info (daemon/read-daemon-file (daemon/daemon-file-path runtime-dir))]
         (is (string? url))
         (is (some? info) "the spawned daemon recorded itself")
@@ -174,11 +175,18 @@
                                                                                                             :_meta {"io.modelcontextprotocol/protocolVersion" "2026-07-28"
                                                                                                                     "io.modelcontextprotocol/clientCapabilities" {}}}})) true)
                               [:result :structuredContent :status]))))
-        (is (= url (stdio/ensure-daemon! config {:runtime-dir runtime-dir :systemd? false :extra-env extra-env}))
+        (is (= url (stdio/ensure-daemon! config {:runtime-dir runtime-dir :extra-env extra-env}))
             "a reachable daemon is reused, not started twice")
-        (testing "SIGTERM stops the spawned daemon cleanly"
+        (testing "a graceful stop (SIGTERM on POSIX, system_shutdown through the proxy on Windows) ends the spawned daemon cleanly"
           (let [handle (.get (java.lang.ProcessHandle/of (:pid info)))]
-            (.destroy handle)
+            (if (platform/windows?)
+              (let [admin (clogem.hub.auth/client-token (clogem.hub.auth/read-clients (str (fs/path config-dir "clients.edn"))) "admin")
+                    reply (json/parse-string (stdio/forward! url admin (json/generate-string {:jsonrpc "2.0" :id 2 :method "tools/call"
+                                                                                                  :params {:name "system_shutdown" :arguments {}
+                                                                                                           :_meta {"io.modelcontextprotocol/protocolVersion" "2026-07-28"
+                                                                                                                   "io.modelcontextprotocol/clientCapabilities" {}}}})) true)]
+                (is (true? (get-in reply [:result :structuredContent :stopping])) (pr-str reply)))
+              (.destroy handle))
             (let [deadline (+ (System/currentTimeMillis) 60000)]
               (loop [] (when (and (.isAlive handle) (< (System/currentTimeMillis) deadline)) (Thread/sleep 100) (recur))))
             (is (not (.isAlive handle)))

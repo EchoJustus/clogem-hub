@@ -9,54 +9,43 @@
 (ns clogem.hub.db.store
   "The daemon's database: one SQLite file, WAL, one writer, read-only reads.
 
-   open! checks the path (PD-10: never under /mnt or ~/RUN, never on a
-   9p/v9fs/drvfs filesystem), creates the directory, sets WAL once, creates
+   open! checks the path (PD-10 through clogem.hub.platform: on Windows a
+   fixed NTFS or ReFS drive, never a UNC path, a network, removable or FAT
+   volume; on POSIX never a 9p/v9fs/drvfs mount or a network filesystem; a
+   warning under a cloud-synced folder), creates the directory, sets WAL once, creates
    schema_migrations, starts the writer as owner of :db/tx on the bus and
    applies the hub's own migrations (the jobs table). Modules get tx!,
    query and migrate!; close! drains the writer."
   (:require [babashka.fs :as fs]
-            [babashka.process :as p]
-            [clojure.string :as str]
             [clogem.hub.db.migrate :as migrate]
             [clogem.hub.db.reader :as reader]
             [clogem.hub.db.writer :as writer]
-            [clogem.hub.log :as log]))
+            [clogem.hub.log :as log]
+            [clogem.hub.platform :as platform]))
 
 (def defaults writer/defaults)
 
 (def hub-migrations "clogem/hub/db/migrations")
 
-(def unsafe-filesystems #{"9p" "v9fs" "drvfs"})
-
-(defn- nearest-existing [path]
-  (loop [p (fs/absolutize path)]
-    (if (or (nil? p) (fs/exists? p)) p (recur (fs/parent p)))))
-
-(defn filesystem-type
-  "The filesystem type of `path` (or its nearest existing ancestor) as
-   `findmnt -n -o FSTYPE -T` reports it; nil when findmnt is unavailable."
+(defn volume-info
+  "clogem.hub.platform/volume-info, a seam for tests."
   [path]
-  (try
-    (let [{:keys [exit out]} (p/shell {:out :string :err :string :continue true}
-                                      "findmnt" "-n" "-o" "FSTYPE" "-T" (str (nearest-existing path)))]
-      (when (zero? exit) (not-empty (str/trim out))))
-    (catch Exception _ nil)))
+  (platform/volume-info path))
 
 (defn check-path!
   "Throw unless `path` may hold the database (PD-10). Returns the
    filesystem type, or nil when it could not be determined."
   [path]
-  (let [abs (str (fs/absolutize path))
-        run (str (fs/path (System/getProperty "user.home") "RUN"))]
-    (when (or (str/starts-with? abs "/mnt/") (= abs run) (str/starts-with? abs (str run "/")))
-      (throw (ex-info (str "refusing a database path under a Windows mount: " abs) {:type :unsafe-path :path abs})))
-    (let [fstype (filesystem-type abs)]
-      (when (contains? unsafe-filesystems fstype)
-        (throw (ex-info (str "refusing a database path on a " fstype " filesystem: " abs)
-                        {:type :unsafe-filesystem :path abs :fstype fstype})))
-      (when (nil? fstype)
-        (log/warn {:msg "filesystem type unknown (findmnt unavailable), continuing" :path abs}))
-      fstype)))
+  (let [{:keys [fstype] :as info} (volume-info path)
+        abs (:path info)]
+    (when-let [problem (platform/volume-problem info)]
+      (throw (ex-info (str "refusing a database path on " problem ": " abs)
+                      {:type :unsafe-filesystem :path abs :fstype fstype :volume info})))
+    (when (nil? fstype)
+      (log/warn {:msg "filesystem type unknown, continuing" :path abs}))
+    (when (platform/cloud-placeholder? abs)
+      (log/warn {:msg "database path lies under a cloud-synced folder; a sync client can lock or corrupt a live database" :path abs}))
+    fstype))
 
 (defn open!
   "Open (creating if needed) the database at :path. Needs :bus. Options as
