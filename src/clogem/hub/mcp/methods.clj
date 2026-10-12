@@ -44,9 +44,16 @@
 
 (def server-info {:name "clogem-hub" :version config/hub-version})
 
-(def capabilities
-  "S01: tools only; listChanged becomes true with subscriptions/listen (S03)."
-  {:tools {:listChanged false}})
+(defn capabilities
+  "What the hub advertises per era. Modern clients get change notifications
+   through subscriptions/listen; legacy clients have no stream (the GET
+   endpoint is not served), so their initialize result promises none."
+  [era]
+  (if (= :modern era)
+    {:tools {:listChanged true}
+     :resources {:subscribe true :listChanged true}}
+    {:tools {:listChanged false}
+     :resources {:subscribe false :listChanged false}}))
 
 (def instructions
   (str "Clogem hub: a local-first daemon exposing media tools as modules. "
@@ -142,6 +149,125 @@
 (defn- tool-error [message]
   (complete {:content [{:type "text" :text message}] :isError true}))
 
+;; ---------------------------------------------------------------------------
+;; Resources
+
+(defn- check-cursor! [params]
+  (when-let [cursor (:cursor params)]
+    (when-not (= "" cursor)
+      (throw (rpc/rpc-error rpc/invalid-params "Invalid params: unknown cursor" {:cursor cursor})))))
+
+(defn resource->mcp
+  "The MCP resource object for a manifest resource."
+  [{:keys [uri name title description mime-type]}]
+  (cond-> {:uri uri :name name}
+    title (assoc :title title)
+    description (assoc :description description)
+    mime-type (assoc :mimeType mime-type)))
+
+(defn template->mcp
+  "The MCP resource template object for a manifest template."
+  [{:keys [uri-template name title description mime-type]}]
+  (cond-> {:uriTemplate uri-template :name name}
+    title (assoc :title title)
+    description (assoc :description description)
+    mime-type (assoc :mimeType mime-type)))
+
+(defn list-resources [{:keys [registry profile]} params]
+  (check-cursor! params)
+  (cacheable {:resources (mapv (comp resource->mcp :resource)
+                               (vals (:resources (registry/resource-index registry profile))))}))
+
+(defn list-templates [{:keys [registry profile]} params]
+  (check-cursor! params)
+  (cacheable {:resourceTemplates (mapv (comp template->mcp :template)
+                                       (:templates (registry/resource-index registry profile)))}))
+
+(def ^:private template-var-re #"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+(defn template-matcher
+  "[regex [var-names]] for a `clogem://m/kind/{var}` template: literal parts
+   are quoted, each variable matches one path segment."
+  [uri-template]
+  (let [vars (mapv second (re-seq template-var-re uri-template))
+        parts (str/split uri-template template-var-re -1)
+        regex (str "^" (str/join "([A-Za-z0-9_.~%-]+)" (map #(java.util.regex.Pattern/quote %) parts)) "$")]
+    [(re-pattern regex) vars]))
+
+(defn match-template
+  "{:params {var value}} when `uri` instantiates `uri-template`, else nil."
+  [uri-template uri]
+  (let [[re vars] (template-matcher uri-template)]
+    (when-let [m (re-matches re uri)]
+      {:params (zipmap (map keyword vars) (map #(java.net.URLDecoder/decode ^String % "UTF-8") (rest m)))})))
+
+(defn find-resource
+  "The index entry serving `uri` for `profile`, with :params for a template
+   match, or nil."
+  [registry profile uri]
+  (let [{:keys [resources templates]} (registry/resource-index registry profile)]
+    (or (some-> (get resources uri) (assoc :params {} :declared (get resources uri)))
+        (some (fn [{:keys [template] :as entry}]
+                (when-let [{:keys [params]} (match-template (:uri-template template) uri)]
+                  (assoc entry :params params :declared template)))
+              templates))))
+
+(defn- content-block [uri declared result]
+  (let [mime (or (:mime-type result) (:mime-type declared) "text/plain")]
+    (cond
+      (string? (:text result)) {:uri uri :mimeType mime :text (:text result)}
+      (string? (:blob result)) {:uri uri :mimeType mime :blob (:blob result)}
+      :else (throw (ex-info "resource handler returned neither :text nor :blob" {:type :bad-resource-result})))))
+
+(defn read-resource [{:keys [registry profile]} params]
+  (let [uri (:uri params)]
+    (when-not (and (string? uri) (not (str/blank? uri)))
+      (throw (rpc/rpc-error rpc/invalid-params "Invalid params: uri must be a non-empty string")))
+    (let [{:keys [handler ctx params declared] :as found} (find-resource registry profile uri)
+          result (when found
+                   (try (handler ctx {:uri uri :params params})
+                        (catch Exception e
+                          (log/warn {:msg "resource handler failed" :uri uri :error (ex-message e)})
+                          (throw (rpc/rpc-error rpc/internal-error "Internal error: resource handler failed" {:uri uri})))))]
+      (when-not (and found result)
+        (throw (rpc/rpc-error rpc/invalid-params "Resource not found" {:uri uri})))
+      (when-not (map? result)
+        (throw (rpc/rpc-error rpc/internal-error "Internal error: resource handler returned no content" {:uri uri})))
+      (cacheable {:contents [(try (content-block uri declared result)
+                                  (catch Exception _
+                                    (throw (rpc/rpc-error rpc/internal-error "Internal error: resource handler returned no content" {:uri uri}))))]}))))
+
+;; ---------------------------------------------------------------------------
+;; Subscriptions (the stream itself lives in the transport)
+
+(defn listen-filter
+  "The notification filter the hub honors for a `subscriptions/listen`
+   request: `toolsListChanged` and `resourcesListChanged` as asked,
+   `resourceSubscriptions` reduced to the URIs the profile can read (a
+   declared resource or an instance of a declared template),
+   `promptsListChanged` dropped (the hub serves no prompts)."
+  [{:keys [registry profile]} params]
+  (let [f (:notifications params)]
+    (when-not (or (nil? f) (map? f))
+      (throw (rpc/rpc-error rpc/invalid-params "Invalid params: notifications must be an object")))
+    (let [subs (:resourceSubscriptions f)]
+      (when-not (or (nil? subs) (and (sequential? subs) (every? string? subs)))
+        (throw (rpc/rpc-error rpc/invalid-params "Invalid params: resourceSubscriptions must be an array of URIs")))
+      (doseq [[k v] (select-keys f [:toolsListChanged :promptsListChanged :resourcesListChanged])]
+        (when-not (boolean? v)
+          (throw (rpc/rpc-error rpc/invalid-params (str "Invalid params: " (name k) " must be a boolean")))))
+      (cond-> {}
+        (true? (:toolsListChanged f)) (assoc :toolsListChanged true)
+        (true? (:resourcesListChanged f)) (assoc :resourcesListChanged true)
+        (seq subs) (assoc :resourceSubscriptions
+                          (vec (distinct (filter #(find-resource registry profile %) subs))))))))
+
+(defn listen-result?
+  "True for the marker `dispatch` returns for subscriptions/listen; the
+   transport opens the stream instead of answering with JSON."
+  [result]
+  (and (map? result) (contains? result :listen/filter)))
+
 (defn call-tool [{:keys [registry profile]} params]
   (let [tool-name (:name params)
         {:keys [tool handler ctx] :as found} (when (string? tool-name)
@@ -180,7 +306,7 @@
 
 (defn initialize [params]
   (complete {:protocolVersion (negotiate-legacy-version (:protocolVersion params))
-             :capabilities capabilities
+             :capabilities (capabilities :legacy)
              :serverInfo server-info
              :instructions instructions}))
 
@@ -194,8 +320,9 @@
 
 (defn dispatch
   "The function clogem.hub.mcp.jsonrpc/handle calls: (dispatch method params message).
-   `deps` is {:registry reg :profile :admin}. Throws rpc/rpc-error for protocol
-   errors; returns the result map otherwise."
+   `deps` is {:registry reg :profile p} (the profile of the authenticated
+   client). Throws rpc/rpc-error for protocol errors; returns the result map
+   otherwise."
   [deps method params message]
   (let [era (era message)]
     (when (and (contains? message :id) (str/starts-with? (str method) "notifications/"))
@@ -206,7 +333,7 @@
       "server/discover"
       (if (= :modern era)
         (cacheable {:supportedVersions supported-versions
-                    :capabilities capabilities
+                    :capabilities (capabilities :modern)
                     :instructions instructions})
         ;; a legacy-shaped discover (no _meta) is how a legacy server would be
         ;; probed; answer it so dual-era clients recognize a modern server
@@ -217,6 +344,15 @@
 
       "tools/list" (list-tools deps params)
       "tools/call" (call-tool deps params)
+      "resources/list" (list-resources deps params)
+      "resources/templates/list" (list-templates deps params)
+      "resources/read" (read-resource deps params)
+
+      "subscriptions/listen"
+      (if (= :modern era)
+        ;; the transport turns this marker into the long-lived stream
+        {:listen/filter (listen-filter deps params)}
+        (throw (method-not-found method era)))
 
       "initialize"
       (if (= :legacy era)
