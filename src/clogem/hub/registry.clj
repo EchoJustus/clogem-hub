@@ -20,14 +20,21 @@
             [clogem.hub.bus :as bus]
             [clogem.hub.log :as log]))
 
+(def default-limits
+  "Most tools a profile may see: a small model is kept to a short list
+   (`:profiles {:llm-small {:max-tools n}}` in the hub configuration)."
+  {:llm-small 10})
+
 (defn new-registry
   "Create a registry. `runtime` is the clogem.api/Runtime handed to modules
    (as :clogem/runtime in their ctx); `bus` receives :registry/changed events;
    `before-start` is an optional (fn [manifest]) run after the manifest and
    its handlers are resolved and before the module starts (the daemon runs
-   the module's migrations there); when it throws, the module is unavailable."
-  [{:keys [runtime bus before-start]}]
-  (atom {:modules {} :runtime runtime :bus bus :before-start before-start}))
+   the module's migrations there); when it throws, the module is unavailable.
+   `limits` is profile → maximum number of tools (default `default-limits`)."
+  [{:keys [runtime bus before-start limits]}]
+  (atom {:modules {} :runtime runtime :bus bus :before-start before-start
+         :limits (or limits default-limits)}))
 
 (defn- notify! [reg payload]
   (when-let [b (:bus @reg)]
@@ -140,7 +147,7 @@
             entry (if (seq conflicts)
                     (unavailable id manifest {:type :conflict :problems conflicts})
                     (start-module reg manifest))]
-        (swap! reg assoc-in [:modules id] entry)
+        (swap! reg #(-> % (assoc-in [:modules id] entry) (dissoc :capped)))
         (notify! reg {:change :registered :module id :status (:status entry)})
         entry))))
 
@@ -149,7 +156,7 @@
   [reg id]
   (if-let [entry (get-in @reg [:modules id])]
     (do (stop-entry! entry)
-        (swap! reg update :modules dissoc id)
+        (swap! reg #(-> % (update :modules dissoc id) (dissoc :capped)))
         (notify! reg {:change :unregistered :module id})
         true)
     false))
@@ -175,18 +182,33 @@
     {:status (if (every? #(= :ready (:status %)) ms) :ok :degraded)
      :modules (mapv #(select-keys % [:id :status :reason]) ms)}))
 
+(defn- cap-tools
+  "Keep the first `limit` tools (deterministic order), warning once per
+   registry state when the profile's list had to be cut."
+  [reg profile tools]
+  (let [limit (get-in @reg [:limits profile])]
+    (if (and limit (> (count tools) limit))
+      (do (when-not (get-in @reg [:capped profile])
+            (swap! reg assoc-in [:capped profile] true)
+            (log/warn {:msg "profile tool list capped" :profile profile :limit limit
+                       :hidden (mapv (comp :name :tool) (drop limit tools))}))
+          (vec (take limit tools)))
+      tools)))
+
 (defn tools-for
-  "Tools exposed to `profile`, ordered by module id then tool name:
+  "Tools exposed to `profile`, ordered by module id then tool name and
+   capped by the profile's limit (`:llm-small` sees at most 10):
    [{:module-id id :tool manifest-tool :handler fn :ctx ctx} ...]."
   [reg profile]
-  (vec (for [{:keys [id manifest handlers] :as entry} (modules reg)
-             :when (serving? entry)
-             tool (sort-by :name (get-in manifest [:mcp :tools]))
-             :when (contains? (:profiles tool) profile)]
-         {:module-id id
-          :tool tool
-          :handler (get-in handlers [:tools (:name tool)])
-          :ctx (module-ctx reg id manifest)})))
+  (cap-tools reg profile
+             (vec (for [{:keys [id manifest handlers] :as entry} (modules reg)
+                        :when (serving? entry)
+                        tool (sort-by :name (get-in manifest [:mcp :tools]))
+                        :when (contains? (:profiles tool) profile)]
+                    {:module-id id
+                     :tool tool
+                     :handler (get-in handlers [:tools (:name tool)])
+                     :ctx (module-ctx reg id manifest)}))))
 
 (defn find-tool
   "The tools-for entry named `tool-name` for `profile`, or nil."

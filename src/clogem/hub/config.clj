@@ -9,10 +9,10 @@
 (ns clogem.hub.config
   "Daemon configuration and XDG paths.
 
-   config:  ~/.config/clogem/      config.edn, modules.edn, clients.edn
+   config:  ~/.config/clogem/      config.edn, modules.edn, clients.edn (0600)
    data:    ~/.local/share/clogem/ clogem.db, artifacts/
    cache:   ~/.cache/clogem/
-   runtime: $XDG_RUNTIME_DIR/clogem/  daemon.edn, lock, nREPL port
+   runtime: $XDG_RUNTIME_DIR/clogem/  daemon.edn, daemon.lock, nREPL port
 
    config.edn is read with clojure.edn (no eval). Environment overrides:
    CLOGEM_CONFIG_DIR, CLOGEM_PORT. The HTTP listener is validated to be a
@@ -37,6 +37,14 @@
         :queue 256                      ; bounded writer queue
         :call-timeout-ms 30000          ; watchdog per pod call
         :tx-timeout-ms 60000}           ; wait for queue room plus reply
+   :auth {:clients-file nil}            ; nil → <config-dir>/clients.edn (mode 0600)
+   :profiles {:llm-small {:max-tools 10}} ; a small model sees at most this many tools
+   :audit {:queue 256}                  ; bounded audit queue (one writer thread)
+   :subscriptions {:keepalive-ms 15000  ; SSE comment line on quiet listen streams
+                   :buffer 64}          ; per-stream notification buffer (dropping)
+   :stdio {:client "stdio"              ; clients.edn entry the stdio proxy speaks as
+           :autostart? true             ; start the daemon when none is reachable
+           :start-timeout-ms 15000}     ; how long the proxy waits for daemon.edn
    :modules {}})
 
 (def loopback-hosts #{"127.0.0.1" "::1" "localhost"})
@@ -70,6 +78,11 @@
   "The database file: `:db :path` or <data-dir>/clogem.db."
   [config]
   (or (get-in config [:db :path]) (str (fs/path (data-dir) "clogem.db"))))
+
+(defn clients-file
+  "The per-client token file: `:auth :clients-file` or <config-dir>/clients.edn."
+  [config]
+  (or (get-in config [:auth :clients-file]) (str (fs/path (config-dir) "clients.edn"))))
 
 (defn read-edn-file
   "The EDN map in `path`, or nil when the file is absent or not a map."
@@ -110,6 +123,25 @@
     (doseq [[k v] (:bus config)]
       (when-not (and (integer? v) (pos? v))
         (throw (ex-info (str "bus " (name k) " must be a positive integer, got " (pr-str v)) {}))))
+    (let [f (get-in config [:auth :clients-file])]
+      (when-not (or (nil? f) (and (string? f) (not (str/blank? f))))
+        (throw (ex-info (str "auth clients-file must be a non-blank string or nil, got " (pr-str f)) {}))))
+    (doseq [[profile {:keys [max-tools]}] (:profiles config)]
+      (when-not (and (integer? max-tools) (pos? max-tools))
+        (throw (ex-info (str "profiles " (name profile) " max-tools must be a positive integer, got " (pr-str max-tools)) {}))))
+    (doseq [[section keys*] [[:audit [:queue]] [:subscriptions [:keepalive-ms :buffer]] [:stdio [:start-timeout-ms]]]
+            k keys*
+            :when (contains? (get config section) k)]
+      (let [v (get-in config [section k])]
+        (when-not (and (integer? v) (pos? v))
+          (throw (ex-info (str (name section) " " (name k) " must be a positive integer, got " (pr-str v)) {})))))
+    (when (contains? (:stdio config) :client)
+      (let [c (get-in config [:stdio :client])]
+        (when-not (and (string? c) (not (str/blank? c)))
+          (throw (ex-info (str "stdio client must be a non-blank string, got " (pr-str c)) {})))))
+    (when (contains? (:stdio config) :autostart?)
+      (when-not (boolean? (get-in config [:stdio :autostart?]))
+        (throw (ex-info (str "stdio autostart? must be a boolean, got " (pr-str (get-in config [:stdio :autostart?]))) {}))))
     config))
 
 (defn load-config
