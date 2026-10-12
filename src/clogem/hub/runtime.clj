@@ -9,11 +9,14 @@
 (ns clogem.hub.runtime
   "The hub's implementation of clogem.api/Runtime.
 
-   S02 scope: publish!/subscribe! go through the bus and are checked against
-   the module's manifest (`:bus/publishes` schemas, `:bus/subscribes`);
+   publish!/subscribe! go through the bus and are checked against the
+   module's manifest (`:bus/publishes` schemas, `:bus/subscribes`);
    request! is a bus command with a reply; submit-tx!, query and job! reach
    the store (single writer, read facade, jobs); config and log work.
-   Processes and LLM throw a clear `:unsupported` error until S04."
+   run-process! and llm-chat! delegate to the functions the daemon hands in
+   (`:process` built by clogem.hub.media.process, `:llm` by clogem.hub.llm);
+   a runtime built without them answers `:unsupported`, which is what
+   registry-only tests use."
   (:require [malli.core :as m]
             [malli.error :as me]
             [clogem.api :as api]
@@ -23,9 +26,9 @@
             [clogem.hub.jobs :as jobs]
             [clogem.hub.log :as log]))
 
-(defn- unsupported [op session]
-  (throw (ex-info (str (name op) " is not available until " session)
-                  {:type :unsupported :op op :available-from session})))
+(defn- unsupported [op]
+  (throw (ex-info (str (name op) " is not available in this runtime (no " (name op) " function was configured)")
+                  {:type :unsupported :op op})))
 
 (defn- registry-of [reg-ref]
   (or @reg-ref (throw (ex-info "runtime has no registry yet" {:type :no-registry}))))
@@ -78,7 +81,7 @@
     (sequential? tx) (vec tx)
     :else tx))
 
-(defrecord HubRuntime [reg-ref config bus store]
+(defrecord HubRuntime [reg-ref config bus store process llm]
   api/Runtime
   (-publish! [_ ctx event-type payload]
     (check-publish! ctx event-type payload)
@@ -97,8 +100,10 @@
     (store/tx! (store-of store) (:module/id ctx) (statements-of tx)))
   (-query [_ _ctx q]
     (store/query (store-of store) q))
-  (-run-process! [_ _ _ _] (unsupported :run-process! "S04"))
-  (-llm-chat! [_ _ _] (unsupported :llm-chat! "S04"))
+  (-run-process! [_ ctx argv opts]
+    (if process (process ctx argv (or opts {})) (unsupported :run-process!)))
+  (-llm-chat! [_ ctx request]
+    (if llm (llm ctx request) (unsupported :llm-chat!)))
   (-job! [_ ctx op job]
     (jobs/handle {:store (store-of store) :bus bus} (:module/id ctx) op job))
   (-config [_ ctx path] (get-in config (into [:modules (:module/id ctx)] path)))
@@ -106,10 +111,12 @@
 
 (defn new-runtime
   "A runtime over `bus` (required) and `store` (nil until the daemon opened
-   the database). Call `attach-registry!` once the registry exists."
-  [{:keys [config bus store]}]
+   the database). `:process` is (fn [ctx argv opts] reply) and `:llm`
+   (fn [ctx request] reply), both optional (see the namespace doc). Call
+   `attach-registry!` once the registry exists."
+  [{:keys [config bus store process llm]}]
   (when-not bus (throw (ex-info "runtime needs a bus" {:type :no-bus})))
-  (->HubRuntime (atom nil) (or config {}) bus store))
+  (->HubRuntime (atom nil) (or config {}) bus store process llm))
 
 (defn attach-registry!
   "Point the runtime at the registry whose modules it serves and own the

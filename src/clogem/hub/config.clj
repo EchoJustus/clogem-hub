@@ -47,6 +47,17 @@
         :tx-timeout-ms 60000}           ; wait for queue room plus reply
    :auth {:clients-file nil}            ; nil → <config-dir>/clients.edn (owner-only)
    :shared-dir nil                      ; publisher cache folder (packaged hub), or nil
+   :modules-file nil                    ; nil → <config-dir>/modules.edn (external modules, S04)
+   :bins {}                             ; program name → path, e.g. {"ffmpeg" "C:\\tools\\ffmpeg.exe"}; else PATH
+   :process {:timeout-ms 600000         ; default budget of clogem.api/run-process!
+             :max-output-bytes 16777216 ; cap on captured stdout and stderr
+             :poll-ms 100}              ; cancel / timeout polling interval
+   :llm {:provider :ollama              ; the only provider in S04
+         :allow-remote? false           ; PD-9: endpoints must be loopback or LAN unless overridden
+         :ollama {:url "http://127.0.0.1:11434"
+                  :model nil            ; nil → the request must name a model
+                  :timeout-ms 120000
+                  :keep-alive "5m"}}
    :profiles {:llm-small {:max-tools 10}} ; a small model sees at most this many tools
    :audit {:queue 256}                  ; bounded audit queue (one writer thread)
    :subscriptions {:keepalive-ms 15000  ; SSE comment line on quiet listen streams
@@ -57,6 +68,31 @@
    :modules {}})
 
 (def loopback-hosts #{"127.0.0.1" "::1" "localhost"})
+
+(defn local-host?
+  "True when `host` is a loopback or LAN address a local-first daemon may
+   talk to (PD-9): localhost, 127/8, ::1, RFC 1918 IPv4 ranges, IPv4
+   link-local and IPv6 unique-local or link-local addresses. Host names
+   other than localhost are not local (the user may set :allow-remote?)."
+  [host]
+  (let [h (str/lower-case (str host))]
+    (boolean
+     (or (contains? loopback-hosts h)
+         (re-matches #"127\.\d{1,3}\.\d{1,3}\.\d{1,3}" h)
+         (re-matches #"10\.\d{1,3}\.\d{1,3}\.\d{1,3}" h)
+         (re-matches #"192\.168\.\d{1,3}\.\d{1,3}" h)
+         (re-matches #"169\.254\.\d{1,3}\.\d{1,3}" h)
+         (some-> (re-matches #"172\.(\d{1,3})\.\d{1,3}\.\d{1,3}" h) second parse-long (as-> n (<= 16 n 31)))
+         (re-matches #"\[?f[cd][0-9a-f]{2}:.*" h)
+         (re-matches #"\[?fe[89ab][0-9a-f]:.*" h)))))
+
+(defn url-host
+  "The host of an http(s) URL string, or nil when it does not parse."
+  [url]
+  (try (let [u (java.net.URI. (str url))]
+         (when (contains? #{"http" "https"} (.getScheme u))
+           (some-> (.getHost u) (str/replace #"^\[|\]$" ""))))
+       (catch Exception _ nil)))
 
 (defn home [] (System/getProperty "user.home"))
 
@@ -116,6 +152,11 @@
   [config]
   (or (:shared-dir config) (:shared (current-paths))))
 
+(defn modules-file
+  "The external module list: `:modules-file` or <config-dir>/modules.edn."
+  [config]
+  (or (:modules-file config) (str (fs/path (config-dir) "modules.edn"))))
+
 (defn read-edn-file
   "The EDN map in `path`, or nil when the file is absent or not a map."
   [path]
@@ -158,9 +199,36 @@
     (let [f (get-in config [:auth :clients-file])]
       (when-not (or (nil? f) (and (string? f) (not (str/blank? f))))
         (throw (ex-info (str "auth clients-file must be a non-blank string or nil, got " (pr-str f)) {}))))
-    (let [d (:shared-dir config)]
-      (when-not (or (nil? d) (and (string? d) (not (str/blank? d))))
-        (throw (ex-info (str "shared-dir must be a non-blank string or nil, got " (pr-str d)) {}))))
+    (doseq [k [:shared-dir :modules-file]]
+      (let [d (get config k)]
+        (when-not (or (nil? d) (and (string? d) (not (str/blank? d))))
+          (throw (ex-info (str (name k) " must be a non-blank string or nil, got " (pr-str d)) {})))))
+    (doseq [[b path] (:bins config)]
+      (when-not (and (string? b) (not (str/blank? b)) (string? path) (not (str/blank? path)))
+        (throw (ex-info (str "bins entries must map a program name to a path, got " (pr-str [b path])) {}))))
+    (doseq [[k v] (:process config)]
+      (when-not (and (integer? v) (pos? v))
+        (throw (ex-info (str "process " (name k) " must be a positive integer, got " (pr-str v)) {}))))
+    (when (contains? config :llm)
+      (let [{:keys [provider allow-remote? ollama]} (:llm config)]
+        (when-not (= :ollama provider)
+          (throw (ex-info (str "llm provider must be :ollama, got " (pr-str provider)) {})))
+        (when-not (boolean? allow-remote?)
+          (throw (ex-info (str "llm allow-remote? must be a boolean, got " (pr-str allow-remote?)) {})))
+        (let [{:keys [url model timeout-ms keep-alive]} ollama
+              host (url-host url)]
+          (when-not host
+            (throw (ex-info (str "llm ollama url must be an http(s) URL, got " (pr-str url)) {})))
+          (when-not (or allow-remote? (local-host? host))
+            (throw (ex-info (str "llm ollama url must point at a loopback or LAN host (PD-9), got " (pr-str url)
+                                 "; set :llm :allow-remote? true to override")
+                            {:type :remote-endpoint :url url})))
+          (when-not (or (nil? model) (and (string? model) (not (str/blank? model))))
+            (throw (ex-info (str "llm ollama model must be a non-blank string or nil, got " (pr-str model)) {})))
+          (when-not (and (integer? timeout-ms) (pos? timeout-ms))
+            (throw (ex-info (str "llm ollama timeout-ms must be a positive integer, got " (pr-str timeout-ms)) {})))
+          (when-not (or (nil? keep-alive) (string? keep-alive) (integer? keep-alive))
+            (throw (ex-info (str "llm ollama keep-alive must be a string, an integer or nil, got " (pr-str keep-alive)) {}))))))
     (doseq [[profile {:keys [max-tools]}] (:profiles config)]
       (when-not (and (integer? max-tools) (pos? max-tools))
         (throw (ex-info (str "profiles " (name profile) " max-tools must be a positive integer, got " (pr-str max-tools)) {}))))

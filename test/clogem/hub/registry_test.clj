@@ -192,7 +192,7 @@
                           (clogem.api/query ctx "SELECT 1")))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"database is not available"
                           (clogem.api/job! ctx :create {:kind "x"})))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not available until S04"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not available in this runtime"
                           (clogem.api/run-process! ctx ["true"])))
     (is (= {:ok false :error {:type :unknown-command :command :nope}}
            (clogem.api/request! ctx {:command :nope})))

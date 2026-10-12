@@ -92,3 +92,26 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"db queue" (config/load-config {:db {:queue 0}})))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"request-timeout-ms" (config/load-config {:bus {:request-timeout-ms -1}})))
   (is (= 256 (get-in (config/load-config {}) [:db :queue]))))
+
+(deftest process-and-llm-reach-the-functions-the-daemon-wires
+  (let [b (bus/new-bus)
+        calls (atom [])
+        rt (runtime/new-runtime {:config config/defaults :bus b
+                                 :process (fn [ctx argv opts] (swap! calls conj [:process (:module/id ctx) argv opts])
+                                            {:exit 0 :out "ok" :err "" :duration-ms 1 :timed-out? false :cancelled? false :truncated? false :argv argv})
+                                 :llm (fn [ctx request] (swap! calls conj [:llm (:module/id ctx) request])
+                                        {:content "hi" :json nil :model "m" :provider :fake :done-reason "stop" :duration-ms 1 :raw {}})})
+        bare (runtime/new-runtime {:config config/defaults :bus b})
+        ctx {:clogem/runtime rt :module/id :echo :module/manifest echo-manifest}]
+    (try
+      (is (= "ok" (:out (api/run-process! ctx ["ffprobe" "-version"] {:timeout-ms 5}))))
+      (is (= "ok" (:out (api/run-process! ctx ["ffprobe" "-version"]))) "opts default to {}")
+      (is (= "hi" (:content (api/llm-chat! ctx {:messages [{:role "user" :content "x"}]}))))
+      (is (= [[:process :echo ["ffprobe" "-version"] {:timeout-ms 5}]
+              [:process :echo ["ffprobe" "-version"] {}]
+              [:llm :echo {:messages [{:role "user" :content "x"}]}]]
+             @calls))
+      (let [e (try (api/run-process! (assoc ctx :clogem/runtime bare) ["x"]) nil (catch clojure.lang.ExceptionInfo e e))]
+        (is (= {:type :unsupported :op :run-process!} (ex-data e)) "a runtime without the seam says so"))
+      (is (= :unsupported (:type (try (api/llm-chat! (assoc ctx :clogem/runtime bare) {}) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))))
+      (finally (bus/stop! b)))))

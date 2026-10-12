@@ -84,3 +84,37 @@
       (spit (str (fs/path dir "evil.edn")) "#=(+ 1 2)")
       (is (thrown? Exception (config/read-edn-file (fs/path dir "evil.edn"))))
       (finally (support/delete-tree! dir)))))
+
+(deftest local-first-endpoints
+  (testing "loopback and LAN hosts are local (PD-9)"
+    (doseq [h ["127.0.0.1" "127.0.0.2" "localhost" "LOCALHOST" "::1" "10.0.0.5" "192.168.1.20" "172.16.0.1" "172.31.255.254"
+               "169.254.10.10" "fd12:3456::1" "fe80::1"]]
+      (is (config/local-host? h) h)))
+  (testing "anything else is not"
+    (doseq [h ["172.32.0.1" "172.15.0.1" "8.8.8.8" "ollama.example.com" "2001:db8::1" "" nil]]
+      (is (not (config/local-host? h)) (pr-str h))))
+  (is (= "127.0.0.1" (config/url-host "http://127.0.0.1:11434")))
+  (is (= "fd12::1" (config/url-host "http://[fd12::1]:11434/api")))
+  (is (= "ollama.example.com" (config/url-host "https://ollama.example.com")))
+  (is (nil? (config/url-host "ftp://x")))
+  (is (nil? (config/url-host "not a url")))
+  (is (nil? (config/url-host nil))))
+
+(deftest s04-keys-are-validated
+  (is (= "http://127.0.0.1:11434" (get-in (config/load-config {}) [:llm :ollama :url])))
+  (is (= 600000 (get-in (config/load-config {}) [:process :timeout-ms])))
+  (is (= "http://192.168.1.20:11434" (get-in (config/load-config {:llm {:ollama {:url "http://192.168.1.20:11434"}}}) [:llm :ollama :url])) "LAN passes")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"loopback or LAN"
+                        (config/load-config {:llm {:ollama {:url "https://api.example.com"}}})) "a remote endpoint is refused")
+  (is (= "https://api.example.com"
+         (get-in (config/load-config {:llm {:allow-remote? true :ollama {:url "https://api.example.com"}}}) [:llm :ollama :url]))
+      "unless the user overrides")
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"http\(s\) URL" (config/load-config {:llm {:ollama {:url "nope"}}})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"provider" (config/load-config {:llm {:provider :openai}})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"timeout-ms" (config/load-config {:llm {:ollama {:timeout-ms 0}}})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bins" (config/load-config {:bins {"ffmpeg" ""}})))
+  (is (= {"ffmpeg" "D:\\tools\\ffmpeg.exe"} (:bins (config/load-config {:bins {"ffmpeg" "D:\\tools\\ffmpeg.exe"}}))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"process timeout-ms" (config/load-config {:process {:timeout-ms -5}})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"modules-file" (config/load-config {:modules-file ""})))
+  (is (= "D:\\mods\\modules.edn" (config/modules-file {:modules-file "D:\\mods\\modules.edn"})))
+  (is (= (str (fs/path (config/config-dir) "modules.edn")) (config/modules-file {})) "defaults to the config directory"))
