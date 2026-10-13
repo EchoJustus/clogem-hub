@@ -238,7 +238,7 @@
 (defn- chat-reply
   "The contract reply for a 2xx response body, or a :llm/provider-error
    when the body is not a response object."
-  [{:keys [url]} {:keys [model format messages]} body status duration-ms]
+  [{:keys [url]} {:keys [model format messages] :as request} body status duration-ms]
   (let [raw (parse-json-body body)]
     (when (or (= ::invalid raw) (not (map? raw)))
       (throw (provider-error (str "response from " url " is not a JSON object")
@@ -248,7 +248,7 @@
                              {:url url :model model :status status :error (body-error body raw)})))
     (let [content (str (get-in raw [:message :content] ""))]
       (log/info {:event :llm/chat :provider :ollama :model (or (:model raw) model) :status status
-                 :duration-ms duration-ms :format (format-kind format)
+                 :module (::module request) :duration-ms duration-ms :format (format-kind format)
                  :messages (count messages) :images (reduce + 0 (map #(count (:images %)) messages))
                  :content-chars (count content) :done-reason (:done_reason raw)})
       {:content content
@@ -261,8 +261,9 @@
 
 (defn- elapsed-ms [started] (int (- (System/currentTimeMillis) started)))
 
-(defn- fail! [e {:keys [model]} started]
-  (log/warn (merge {:event :llm/chat-failed :provider :ollama :model model :duration-ms (elapsed-ms started)}
+(defn- fail! [e {:keys [model] :as request} started]
+  (log/warn (merge {:event :llm/chat-failed :provider :ollama :model model :module (::module request)
+                    :duration-ms (elapsed-ms started)}
                    (select-keys (ex-data e) [:type :status :error :url :timeout-ms])))
   (throw e))
 
@@ -304,7 +305,7 @@
                    (catch Exception e (throw (http-error e ctx))))
               duration (elapsed-ms started)]
           (if (<= 200 status 299)
-            (chat-reply {:url url} request body status duration)
+            (chat-reply ctx request body status duration)
             (let [error (body-error body (parse-json-body body))]
               (throw (provider-error (str url " answered " status (some->> error (str ": ")))
                                      (assoc ctx :status status :error error))))))

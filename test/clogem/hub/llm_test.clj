@@ -99,6 +99,16 @@
 (defn- received [] @(:received @state))
 (defn- last-request [] (last (received)))
 
+(defn- await-record!
+  "Wait (up to 5 s) until the fake has recorded a request for `model`: the
+   slow handler records on the server's worker thread after the client
+   gave up, and must not leak into the next test's `received`."
+  [model]
+  (let [deadline (+ (System/currentTimeMillis) 5000)]
+    (while (and (not-any? #(= model (get-in % [:body :model])) (received))
+                (< (System/currentTimeMillis) deadline))
+      (Thread/sleep 10))))
+
 (use-fixtures :once
   (fn [f]
     (log/set-level! :error)
@@ -238,12 +248,14 @@
   (let [data (thrown-data #(llm/chat (provider) {:messages messages :model "slow" :timeout-ms 300}))]
     (is (= :llm/timeout (:type data)))
     (is (= 300 (:timeout-ms data)) "the request's timeout overrides the provider's")
-    (is (= "java.net.http.HttpTimeoutException" (:cause data)))))
+    (is (= "java.net.http.HttpTimeoutException" (:cause data))))
+  (await-record! "slow"))
 
 (deftest provider-timeout-applies-when-the-request-names-none
   (let [data (thrown-data #(llm/chat (provider {:timeout-ms 300}) {:messages messages :model "slow"}))]
     (is (= :llm/timeout (:type data)))
-    (is (= 300 (:timeout-ms data)))))
+    (is (= 300 (:timeout-ms data))))
+  (await-record! "slow"))
 
 (deftest closed-port-is-unreachable
   (let [port (closed-port)
@@ -342,7 +354,11 @@
       (is (= {:age 22 :available false}
              (:json (f ctx {:messages messages :model "structured" :format {"type" "object"}})))))
     (testing "the configured timeout applies"
-      (is (= 5000 (:timeout-ms (llm/validate-request {:messages messages} {:model "plain" :timeout-ms 5000})))))))
+      (let [f2 (llm/chat-fn (assoc-in cfg [:llm :ollama :timeout-ms] 300))
+            data (thrown-data #(f2 ctx {:messages messages :model "slow"}))]
+        (is (= :llm/timeout (:type data)))
+        (is (= 300 (:timeout-ms data))))
+      (await-record! "slow"))))
 
 (deftest chat-fn-refuses-another-provider
   (is (= :llm/invalid-config
