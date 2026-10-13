@@ -1,0 +1,64 @@
+;; © 2026 EchoJustus (Email: EchoJustus.Studio@outlook.com)
+;;
+;; This program and the accompanying materials are made available under the
+;; terms of the Eclipse Public License 2.0 which is available at
+;; https://www.eclipse.org/legal/epl-2.0
+;;
+;; SPDX-License-Identifier: EPL-2.0
+
+;; Built-in `media` module: the media library. A file is registered under a
+;; content fingerprint (so a moved file keeps its id and changed content gets
+;; a new one) and probed with ffprobe through clogem.api/run-process!.
+{:manifest/version 1
+ :module/id :media
+ :module/version "0.1.0"
+ :module/license :epl-2.0
+ :module/description "Media library: register files by content fingerprint and probe them with ffprobe."
+ :module/entry clogem.module.media.core/module
+ :module/requires {:clogem/api "1" :bins ["ffprobe"] :env #{}}
+ :bus {:publishes {:media/registered [:map {:closed true} [:id :string] [:path :string]]
+                   ;; the hub turns this into notifications/resources/updated
+                   :resource/updated [:map {:closed true} [:uri :string]]}
+       :subscribes #{}}
+ :db {:migrations "clogem/module/media/migrations"}
+ :mcp {:tools [{:name "media_register"
+                :title "Register media"
+                :description "Register a media file in the hub's library and return its stable id. Call it first, before any tool that takes a media id: the id is derived from the file's content (size, first and last MiB, duration), so the same content gets the same id wherever the file lives. A file that moved is relinked to its new path (relinked true); content that changed under a known path gets a new id and the old row loses its path (created true). Reads the file and runs ffprobe; the file itself is never modified."
+                :handler clogem.module.media.tools/register
+                :input [:map {:closed true} [:path :string]]
+                :output [:map
+                         [:id :string]
+                         [:path :string]
+                         [:size :int]
+                         [:duration-ms :int]
+                         [:fingerprint :string]
+                         [:created :boolean]
+                         [:relinked :boolean]]
+                :annotations {:readOnlyHint false :destructiveHint false :idempotentHint true}
+                :meta {}
+                :profiles #{:gui :llm-small :llm-large :admin}}
+               {:name "media_probe"
+                :title "Probe media"
+                :description "Return ffprobe's format and stream metadata for a media id or a file path, with the duration in integer milliseconds. Use it to learn a file's container, codecs, resolution and duration before processing it. Give either id (a registered item; the document stored at registration is returned while the file is unchanged) or path (any readable file; ffprobe runs when no stored document matches). Read-only."
+                :handler clogem.module.media.tools/probe
+                :input [:map {:closed true}
+                        [:id {:optional true} :string]
+                        [:path {:optional true} :string]]
+                :output [:map
+                         [:format :map]
+                         [:streams [:vector :map]]
+                         [:duration-ms :int]]
+                :annotations {:readOnlyHint true :destructiveHint false :idempotentHint true}
+                :meta {}
+                :profiles #{:gui :llm-small :llm-large :admin}}]
+       :resources []
+       :resource-templates [{:uri-template "clogem://media/item/{id}"
+                             :name "item"
+                             :title "Media item"
+                             :description "The library row of media {id} as JSON: path (null when the file was replaced), size, fingerprint, duration_ms, created_ms, updated_ms and the ffprobe document stored at registration. Absent for an unknown id."
+                             :mime-type "application/json"
+                             :handler clogem.module.media.resources/item
+                             :profiles #{:gui :llm-small :llm-large :admin}}]
+       :prompts []}
+ :ui {:card {:title "Media" :icon "film" :quick-actions ["media_register"]}
+      :routes []}}
