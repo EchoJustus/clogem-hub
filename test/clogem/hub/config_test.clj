@@ -112,6 +112,8 @@
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"http\(s\) URL" (config/load-config {:llm {:ollama {:url "nope"}}})))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"provider" (config/load-config {:llm {:provider :openai}})))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"timeout-ms" (config/load-config {:llm {:ollama {:timeout-ms 0}}})))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"connect-timeout-ms" (config/load-config {:llm {:ollama {:connect-timeout-ms "soon"}}})))
+  (is (= 10000 (get-in (config/load-config {}) [:llm :ollama :connect-timeout-ms])))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"bins" (config/load-config {:bins {"ffmpeg" ""}})))
   (is (= {"ffmpeg" "D:\\tools\\ffmpeg.exe"} (:bins (config/load-config {:bins {"ffmpeg" "D:\\tools\\ffmpeg.exe"}}))))
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"process timeout-ms" (config/load-config {:process {:timeout-ms -5}})))

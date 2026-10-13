@@ -56,7 +56,8 @@
          :allow-remote? false           ; PD-9: endpoints must be loopback or LAN unless overridden
          :ollama {:url "http://127.0.0.1:11434"
                   :model nil            ; nil → the request must name a model
-                  :timeout-ms 120000
+                  :timeout-ms 120000    ; per request
+                  :connect-timeout-ms 10000 ; a dead LAN host fails fast as :llm/unreachable
                   :keep-alive "5m"}}
    :profiles {:llm-small {:max-tools 10}} ; a small model sees at most this many tools
    :audit {:queue 256}                  ; bounded audit queue (one writer thread)
@@ -215,7 +216,7 @@
           (throw (ex-info (str "llm provider must be :ollama, got " (pr-str provider)) {})))
         (when-not (boolean? allow-remote?)
           (throw (ex-info (str "llm allow-remote? must be a boolean, got " (pr-str allow-remote?)) {})))
-        (let [{:keys [url model timeout-ms keep-alive]} ollama
+        (let [{:keys [url model timeout-ms connect-timeout-ms keep-alive]} ollama
               host (url-host url)]
           (when-not host
             (throw (ex-info (str "llm ollama url must be an http(s) URL, got " (pr-str url)) {})))
@@ -225,8 +226,9 @@
                             {:type :remote-endpoint :url url})))
           (when-not (or (nil? model) (and (string? model) (not (str/blank? model))))
             (throw (ex-info (str "llm ollama model must be a non-blank string or nil, got " (pr-str model)) {})))
-          (when-not (and (integer? timeout-ms) (pos? timeout-ms))
-            (throw (ex-info (str "llm ollama timeout-ms must be a positive integer, got " (pr-str timeout-ms)) {})))
+          (doseq [[k v] {:timeout-ms timeout-ms :connect-timeout-ms connect-timeout-ms}]
+            (when-not (and (integer? v) (pos? v))
+              (throw (ex-info (str "llm ollama " (name k) " must be a positive integer, got " (pr-str v)) {}))))
           (when-not (or (nil? keep-alive) (string? keep-alive) (integer? keep-alive))
             (throw (ex-info (str "llm ollama keep-alive must be a string, an integer or nil, got " (pr-str keep-alive)) {}))))))
     (doseq [[profile {:keys [max-tools]}] (:profiles config)]
