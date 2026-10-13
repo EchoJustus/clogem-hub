@@ -32,7 +32,9 @@ primitive must behave the same on Windows and POSIX hosts.
    ended by `progress=`) are parsed and delivered through `:on-progress` as they arrive; stdout is
    then not accumulated. A helper runs ffprobe with `-print_format json -show_format -show_streams
    -show_error` and converts `format.duration` (seconds, a string) to integer milliseconds.
-   Defaults come from `:process {:timeout-ms :max-output-bytes :poll-ms}` in the configuration.
+   Defaults come from `:process {:timeout-ms :max-output-bytes :poll-ms}` in the configuration;
+   a caller's options override them, except that the configured `:bins` win over a caller's for
+   the same program name (where the user's ffmpeg lives is the user's decision, not a module's).
 3. **LLM adapter (`clogem.hub.llm`).** A `Provider` protocol with Ollama as the first
    implementation: `POST /api/chat` with `stream false`, `format` passed through (`"json"` or a
    JSON Schema map for structured output), `options.temperature` 0 unless the request says
