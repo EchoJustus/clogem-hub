@@ -41,7 +41,9 @@ src/clogem/hub/db/{sqlite,sql,writer,reader,migrate,store}.clj      resources/cl
 src/clogem/module/system/{core,tools}.clj                resources/clogem/module/system/manifest.edn
 test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)   test/fixtures/db/ (kill-test and stop-test child scripts)
 docs/adr/  docs/mcp-compliance.md  docs/deps.md
-planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, media/ llm/ and module/{media,ui} (S04), docs/roadmap.md
+src/clogem/hub/{modules,llm}.clj  src/clogem/hub/media/process.clj                     test/fixtures/process/ (fake ffmpeg and ffprobe scripts)
+src/clogem/module/{media,ui}/…  resources/clogem/module/{media,ui}/{manifest.edn,migrations/NNNN-slug.sql}
+planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, docs/roadmap.md
 ```
 
 ## Rules
@@ -124,7 +126,25 @@ planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, media/ llm/ and module/{
   delivers them; a configured shared directory (`CLOGEM_SHARED_DIR` or `:shared-dir`, the
   packaged hub's publisher cache folder) receives a copy of `daemon.edn` and one owner-only
   token file per client for the other packages of the same publisher.
+- **Primitives (S04, ADR-0007):** `clogem.api` 1.0.0 is frozen in the SDK and implemented here in
+  full. `clogem.hub.runtime` carries two seams, `:process` and `:llm`; the daemon wires
+  `clogem.hub.media.process/runner` and `clogem.hub.llm/chat-fn`, tests inject fakes. The process
+  runner takes argv vectors only, resolves the program from `:bins` then `PATH` (`fs/which`, `.exe`
+  on Windows), drains stdout and stderr on their own threads, polls the deadline and the cancel
+  atom, kills hard (`destroy-tree`, then `destroyForcibly`), caps output and parses `-progress`
+  blocks for `:on-progress`. The LLM adapter speaks to Ollama (`/api/chat`, `stream false`,
+  `format` for structured output, temperature 0, base64 images) at the configured URL only (PD-9:
+  config validation refuses a non-local URL unless `:allow-remote? true`) and never logs message
+  contents. `clogem.hub.modules` loads proprietary modules from `modules.edn` in the config
+  directory (`{:modules [{:id :root :enabled?}]}`; `src` and `resources` of each root join the
+  classpath; failures are logged, never fatal); this repository never names them. The registry
+  does not check `:bins`: a module reports a missing program from its `:health` hook as
+  `:degraded`. Built-in `media` (table `media_items`, fingerprint = sha256(size ‖ first ≤ 1 MiB ‖
+  last ≤ 1 MiB), id `m-` + 32 hex of sha256(fingerprint|duration-ms), relink on move, new row on
+  new content) and `ui` (table `ui_inbox`, subscribes `:ui/command`, publishes
+  `:resource/updated` for `clogem://ui/inbox/{client}`, `ui_ack`).
 - **ADRs:** `docs/adr/NNNN-slug.md`, public-safe: 0001 modular monolith and two channels, 0002
   dual-era MCP, 0003 single writer and pod semantics, 0005 lifecycle and security (lock, tokens,
   profiles, audit, subscription stream), 0006 Windows as the product platform (paths, owner-only
-  files, in-band shutdown, volume check, CI matrix). Session logs never live here.
+  files, in-band shutdown, volume check, CI matrix), 0007 plugin primitives (process runner, LLM
+  adapter, module loader, `media` and `ui`). Session logs never live here.

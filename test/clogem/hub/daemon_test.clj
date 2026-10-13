@@ -97,7 +97,8 @@
         shared (str (fs/path dir "shared"))
         config (config/load-config {:http {:port 0} :db {:path (str (fs/path dir "clogem.db"))}})
         system (daemon/start! {:config config :runtime-dir (str (fs/path dir "run"))
-                               :clients-file (str (fs/path dir "clients.edn")) :shared-dir shared})
+                               :clients-file (str (fs/path dir "clients.edn")) :shared-dir shared
+                               :modules-file (str (fs/path dir "modules.edn"))})
         {:keys [port daemon-file store]} system
         clients @(:clients system)
         admin (auth/client-token clients "admin")
@@ -126,6 +127,68 @@
         (try
           (is (= [{:n 400000}] (store/query s "SELECT count(*) AS n FROM shut_t")) "the queued transactions were committed before the stop")
           (finally (store/close! s) (bus/stop! b))))
+      (finally
+        (daemon/stop! system)
+        (log/set-level! :info)
+        (support/delete-tree! dir)))))
+
+(defn- write-external-module!
+  "A minimal module under `root` (src/ and resources/ as modules.edn expects)
+   with one read-only tool; what a module from another repository looks
+   like on disk."
+  [root]
+  (let [src (fs/path root "src" "clogem" "module" "exttest")
+        res (fs/path root "resources" "clogem" "module" "exttest")]
+    (fs/create-dirs src)
+    (fs/create-dirs res)
+    (spit (str (fs/path src "core.clj"))
+          (str "(ns clogem.module.exttest.core (:require [clogem.api :as api]))\n"
+               "(def module {:start (fn [ctx] (api/log ctx :info {:msg \"exttest started\"}) {})"
+               " :stop (fn [_] nil) :health (fn [_] {:status :ok})})\n"
+               "(defn ping [_ctx _args] {:pong true})\n"))
+    (spit (str (fs/path res "manifest.edn"))
+          (pr-str {:manifest/version 1 :module/id :exttest :module/version "0.0.1" :module/license :epl-2.0
+                   :module/description "An external test module."
+                   :module/entry 'clogem.module.exttest.core/module
+                   :module/requires {:clogem/api "1" :bins [] :env #{}}
+                   :bus {:publishes {} :subscribes #{}}
+                   :db {:migrations nil}
+                   :mcp {:tools [{:name "exttest_ping" :title "Ping"
+                                  :description "Reply pong. Use it to check that an external module is served."
+                                  :handler 'clogem.module.exttest.core/ping
+                                  :input [:map {:closed true}] :output [:map [:pong :boolean]]
+                                  :annotations {:readOnlyHint true :idempotentHint true} :meta {}
+                                  :profiles #{:gui :llm-small :llm-large :admin}}]
+                         :resources [] :resource-templates [] :prompts []}
+                   :ui {:card {:title "Ext" :icon "puzzle" :quick-actions []} :routes []}}))
+    root))
+
+(deftest external-modules-load-from-modules-edn
+  (log/set-level! :error)
+  (let [dir (fs/create-temp-dir {:prefix "clogem-ext"})
+        _ (write-external-module! (fs/path dir "extmod"))
+        modules-file (str (fs/path dir "modules.edn"))
+        _ (spit modules-file (pr-str {:modules [{:id :exttest :root "extmod"}
+                                                {:id :ghost :root "missing" :enabled? true}
+                                                {:id :off :root "nowhere" :enabled? false}]}))
+        config (config/load-config {:http {:port 0} :db {:path (str (fs/path dir "clogem.db"))}})
+        system (daemon/start! {:config config :runtime-dir (str (fs/path dir "run"))
+                               :clients-file (str (fs/path dir "clients.edn")) :modules-file modules-file})
+        {:keys [port external-modules]} system
+        clients @(:clients system)
+        admin (auth/client-token clients "admin")
+        llm (auth/client-token clients "llm")]
+    (try
+      (testing "the loader's report"
+        (is (= [:exttest] (:loaded external-modules)))
+        (is (= [:ghost] (mapv :id (:failed external-modules))) "a missing root fails that entry only"))
+      (testing "the built-in modules and the external one are listed"
+        (let [reply (call-tool port admin "system_list_modules")
+              modules (get-in reply [:result :structuredContent :modules])]
+          (is (= #{"exttest" "media" "system" "ui"} (set (map :id modules))) (pr-str reply))
+          (is (every? #(= "ready" (:status %)) (remove (comp #{"media"} :id) modules)) "system, ui and the external module are ready")))
+      (testing "the external module's tool is served to any profile it names"
+        (is (true? (get-in (call-tool port llm "exttest_ping") [:result :structuredContent :pong]))))
       (finally
         (daemon/stop! system)
         (log/set-level! :info)

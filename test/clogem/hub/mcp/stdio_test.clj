@@ -29,7 +29,8 @@
 (defn- with-daemon [f]
   (let [dir (fs/create-temp-dir {:prefix "clogem-daemon"})
         system (daemon/start! {:config (test-config dir {}) :runtime-dir (str dir)
-                               :clients-file (str (fs/path dir "clients.edn"))})]
+                               :clients-file (str (fs/path dir "clients.edn"))
+                               :modules-file (str (fs/path dir "modules.edn"))})]
     (try (f (assoc system :token (clogem.hub.auth/client-token @(:clients system) "stdio")))
          (finally (daemon/stop! system) (support/delete-tree! dir)))))
 
@@ -104,7 +105,8 @@
 (deftest start-failures-leave-nothing-behind
   (let [dir (fs/create-temp-dir {:prefix "clogem-daemon-busy"})
         first-system (daemon/start! {:config (test-config dir {}) :runtime-dir (str dir)
-                                     :clients-file (str (fs/path dir "clients.edn"))})
+                                     :clients-file (str (fs/path dir "clients.edn"))
+                                     :modules-file (str (fs/path dir "modules.edn"))})
         token (clogem.hub.auth/client-token @(:clients first-system) "admin")
         other-dir (fs/create-temp-dir {:prefix "clogem-daemon-busy2"})
         busy (test-config other-dir {:http {:port (:port first-system)}})]
@@ -139,7 +141,7 @@
         (is (= (:path store) (:db info)) "daemon.edn names the database"))
       (is (fs/exists? (:path store)))
       (is (= [:db/tx :system/health :system/modules :system/shutdown] (clogem.hub.bus/owners bus)))
-      (is (= [:system] (clogem.hub.registry/module-ids registry)))
+      (is (= #{:media :system :ui} (set (clogem.hub.registry/module-ids registry))) "the built-in modules")
       (let [info (clojure.edn/read-string (slurp daemon-file))]
         (is (= (clogem.hub.lock/lock-path (fs/parent daemon-file)) (:lock info)) "daemon.edn names the lock")
         (is (fs/exists? (:clients-file info)) "daemon.edn names the clients file it created")
@@ -207,7 +209,8 @@
         _ (fs/create-dirs config-dir)
         _ (spit (str (fs/path config-dir "config.edn")) (pr-str {:stdio {:autostart? false}}))
         system (daemon/start! {:config (test-config base {}) :runtime-dir runtime-dir
-                               :clients-file (str (fs/path config-dir "clients.edn"))})]
+                               :clients-file (str (fs/path config-dir "clients.edn"))
+                               :modules-file (str (fs/path config-dir "modules.edn"))})]
     (try
       (clogem.hub.registry/register! (:registry system) (clogem.sdk.manifest/read-manifest (clojure.java.io/resource "clogem/module/echo/manifest.edn")))
       (let [meta {"io.modelcontextprotocol/protocolVersion" "2026-07-28" "io.modelcontextprotocol/clientCapabilities" {}}

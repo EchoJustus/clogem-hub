@@ -11,7 +11,9 @@
    writer, hub schema), builds the runtime and the registry, loads the
    built-in modules (running their migrations first), serves MCP over
    Streamable HTTP on 127.0.0.1 and, in development, an nREPL on a random
-   loopback port. Writes daemon.edn (pid, port, version, nrepl port, db,
+   loopback port. Proprietary modules listed in modules.edn (the config
+   directory, or `:modules-file`) are loaded after the built-in ones; a
+   failing entry is logged, never fatal (clogem.hub.modules). Writes daemon.edn (pid, port, version, nrepl port, db,
    lock, clients file) under the runtime directory so other doors can find
    it, and, when a shared directory is configured (the publisher cache
    folder of the packaged hub), a copy of it plus one token file per client
@@ -39,18 +41,23 @@
             [clogem.hub.config :as config]
             [clogem.hub.db.sqlite :as sqlite]
             [clogem.hub.db.store :as store]
+            [clogem.hub.llm :as llm]
             [clogem.hub.lock :as lock]
             [clogem.hub.log :as log]
+            [clogem.hub.media.process :as process]
             [clogem.hub.mcp.http :as http]
             [clogem.hub.mcp.methods :as methods]
             [clogem.hub.mcp.subscriptions :as subs]
+            [clogem.hub.modules :as modules]
             [clogem.hub.registry :as registry]
             [clogem.hub.runtime :as runtime]
             [clogem.sdk.manifest :as manifest]))
 
 (def builtin-manifests
   "Classpath resources of the built-in modules, in load order."
-  ["clogem/module/system/manifest.edn"])
+  ["clogem/module/system/manifest.edn"
+   "clogem/module/media/manifest.edn"
+   "clogem/module/ui/manifest.edn"])
 
 (def shutdown-command
   "The bus command the `system` module sends to stop the daemon."
@@ -137,10 +144,11 @@
   "Start the daemon. Options: :config (default load-config), :nrepl? (default
    false), :runtime-dir (default config/runtime-dir), :clients-file (default
    config/clients-file), :shared-dir (default config/shared-dir, may be nil),
+   :modules-file (default config/modules-file; absent → no external modules),
    :exit-on-stop? (default false; -main passes true so a `system_shutdown`
    ends the process). Returns the system map for stop!. Throws ex-info
    {:type :already-running} when another daemon holds this user's lock."
-  [{:keys [config nrepl? runtime-dir clients-file shared-dir exit-on-stop?]
+  [{:keys [config nrepl? runtime-dir clients-file shared-dir modules-file exit-on-stop?]
     :or {nrepl? false exit-on-stop? false}}]
   (let [config (or config (config/load-config))
         dir (or runtime-dir (config/runtime-dir))
@@ -155,12 +163,16 @@
             _ (swap! system assoc :bus b)
             st (store/open! (assoc (:db config) :path (config/db-path config) :bus b))
             _ (swap! system assoc :store st)
-            rt (runtime/new-runtime {:config config :bus b :store st})
+            rt (runtime/new-runtime {:config config :bus b :store st
+                                     :process (process/runner config)
+                                     :llm (llm/chat-fn config)})
             reg (registry/new-registry {:runtime rt :bus b :before-start (partial migrate-module! st)
                                         :limits (merge registry/default-limits (profile-limits config))})]
         (swap! system assoc :registry reg :runtime rt)
         (runtime/attach-registry! rt reg)
         (load-builtins! reg)
+        (swap! system assoc :external-modules
+               (modules/load-all! reg (or modules-file (config/modules-file config))))
         (let [clients-path (or clients-file (config/clients-file config))
               clients (auth/load-clients! clients-path)
               au (audit/start! st (:audit config))

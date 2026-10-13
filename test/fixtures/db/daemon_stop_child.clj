@@ -23,7 +23,7 @@
       clients-file (str (fs/path dir "clients.edn"))
       config (config/load-config {:http {:port 0} :db {:path (str (fs/path dir "clogem.db"))}})
       system (daemon/start! {:config config :runtime-dir (str (fs/path dir "run")) :clients-file clients-file
-                             :exit-on-stop? true})
+                             :modules-file (str (fs/path dir "modules.edn")) :exit-on-stop? true})
       st (:store system)]
   (daemon/install-signal-handlers! system)
   (store/tx! st :hub ["CREATE TABLE IF NOT EXISTS sig_t (id INTEGER PRIMARY KEY, v INTEGER)"])
