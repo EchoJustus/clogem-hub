@@ -1,0 +1,44 @@
+;; © 2026 EchoJustus (Email: EchoJustus.Studio@outlook.com)
+;;
+;; This program and the accompanying materials are made available under the
+;; terms of the Eclipse Public License 2.0 which is available at
+;; https://www.eclipse.org/legal/epl-2.0
+;;
+;; SPDX-License-Identifier: EPL-2.0
+
+;; Built-in `ui` module: the inbox of commands other modules address to a
+;; GUI client. Modules publish :ui/command {:client "<id>" :command {…}};
+;; the inbox keeps each command until the client acknowledges it.
+{:manifest/version 1
+ :module/id :ui
+ :module/version "0.1.0"
+ :module/license :epl-2.0
+ :module/description "Inbox of commands addressed to a GUI client, kept until acknowledged."
+ :module/entry clogem.module.ui.core/module
+ :module/requires {:clogem/api "1" :bins [] :env #{}}
+ :bus {:publishes {;; the hub turns this into notifications/resources/updated
+                   :resource/updated [:map {:closed true} [:uri :string]]}
+       :subscribes #{:ui/command}}
+ :db {:migrations "clogem/module/ui/migrations"}
+ :mcp {:tools [{:name "ui_ack"
+                :title "Acknowledge a UI command"
+                :description "Acknowledge one command in a client's inbox (clogem://ui/inbox/{client}) once the GUI has acted on it, so that it no longer appears there. Call it with the client id and the command's id as listed by the inbox. Acknowledging the same command again is harmless and still reports acked true; an id that is not in that client's inbox reports acked false."
+                :handler clogem.module.ui.tools/ack
+                :input [:map {:closed true}
+                        [:client :string]
+                        [:id :int]]
+                :output [:map [:acked :boolean]]
+                :annotations {:readOnlyHint false :destructiveHint false :idempotentHint true}
+                :meta {}
+                :profiles #{:gui :admin}}]
+       :resources []
+       :resource-templates [{:uri-template "clogem://ui/inbox/{client}"
+                             :name "inbox"
+                             :title "Client inbox"
+                             :description "The commands addressed to a client that it has not acknowledged yet, oldest first: a JSON array of objects {id, command, created_ms}. An empty array when there are none."
+                             :mime-type "application/json"
+                             :handler clogem.module.ui.resources/inbox
+                             :profiles #{:gui :admin}}]
+       :prompts []}
+ :ui {:card {:title "UI" :icon "window" :quick-actions []}
+      :routes []}}
