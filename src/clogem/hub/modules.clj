@@ -116,10 +116,10 @@
       (assoc base :exists? false)
       (let [{:keys [value error]} (try {:value (config/read-edn-file file)}
                                        (catch Exception e {:error (ex-message e)}))
-            entries (:modules value)]
+            entries (get value :modules [])]
         (cond
           error (assoc base :exists? true :problems [(str "cannot read " file ": " error)])
-          (nil? value) (assoc base :exists? true :problems [(str file " is not an EDN map")])
+          (nil? value) (assoc base :exists? true :problems [(str file " is not an EDN map (or is empty)")])
           (not (sequential? entries))
           (assoc base :exists? true
                  :problems [(str ":modules must be a vector of entries, got " (pr-str entries))])
@@ -169,7 +169,9 @@
     (let [entry (registry/register! reg manifest)]
       (if (serving? entry)
         {:ok? true :status (:status entry)}
-        (assoc (failure (:reason entry)) :registered? true :status (:status entry))))
+        (assoc (failure (:reason entry))
+               :registered? (contains? (:modules @reg) (:module/id manifest))
+               :status (:status entry))))
     (catch Exception e
       (failure {:type :register-failed :message (ex-message e) :data (ex-data e)}))))
 
