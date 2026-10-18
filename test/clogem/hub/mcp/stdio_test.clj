@@ -18,10 +18,18 @@
             [clogem.hub.lock]
             [clogem.hub.daemon :as daemon]
             [clogem.hub.log :as log]
+            [clogem.hub.media.process :as process]
             [clogem.hub.mcp.stdio :as stdio]
             [clogem.hub.platform :as platform]))
 
 (use-fixtures :once (fn [f] (log/set-level! :error) (try (f) (finally (log/set-level! :info)))))
+
+(defn- expected-health
+  "What system_health reports on this machine: the built-in media module is
+   :degraded without ffprobe (its health hook runs `ffprobe -version`), and
+   then the hub as a whole is \"degraded\"; CI runners have no ffprobe."
+  []
+  (if (process/binary-available? "ffprobe" {}) "ok" "degraded"))
 
 (defn- test-config [dir overrides]
   (config/load-config (merge {:http {:port 0} :db {:path (str (fs/path dir "clogem.db"))}} overrides)))
@@ -63,7 +71,7 @@
                                                      :_meta {"io.modelcontextprotocol/protocolVersion" "2026-07-28"
                                                              "io.modelcontextprotocol/clientCapabilities" {}}}})
                 reply (json/parse-string (stdio/forward! url token body) true)]
-            (is (= "ok" (get-in reply [:result :structuredContent :status])))))
+            (is (= (expected-health) (get-in reply [:result :structuredContent :status])))))
         (testing "without the token the daemon answers 401, which the proxy relays as the JSON-RPC error body"
           (let [reply (json/parse-string (stdio/forward! url nil "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"ping\"}") true)]
             (is (= -32600 (get-in reply [:error :code])))
@@ -173,7 +181,7 @@
         (is (fs/exists? (fs/path config-dir "clients.edn")) "it created clients.edn in the temp config dir")
         (let [token (stdio/client-token config {:clients-file (str (fs/path config-dir "clients.edn"))})]
           (is (string? token))
-          (is (= "ok" (get-in (json/parse-string (stdio/forward! url token (json/generate-string {:jsonrpc "2.0" :id 1 :method "tools/call"
+          (is (= (expected-health) (get-in (json/parse-string (stdio/forward! url token (json/generate-string {:jsonrpc "2.0" :id 1 :method "tools/call"
                                                                                                    :params {:name "system_health" :arguments {}
                                                                                                             :_meta {"io.modelcontextprotocol/protocolVersion" "2026-07-28"
                                                                                                                     "io.modelcontextprotocol/clientCapabilities" {}}}})) true)
