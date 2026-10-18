@@ -12,13 +12,23 @@
    Timing assertions are loose: CI runners are slow and every child is a
    fresh bb start."
   (:require [babashka.fs :as fs]
+            [babashka.process :as p]
             [clogem.hub.test-support :as support]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [clogem.hub.log :as log]
             [clogem.hub.media.process :as process]))
 
-(use-fixtures :once (fn [f] (log/set-level! :error) (try (f) (finally (log/set-level! :info)))))
+(defn- current-log-level
+  "The level clogem.hub.log prints from: the lowest one it reports enabled
+   (the namespace has no getter)."
+  []
+  (some #(when (log/enabled? %) %) [:debug :info :warn :error]))
+
+(use-fixtures :once (fn [f]
+                      (let [prev (current-log-level)]
+                        (log/set-level! :error)
+                        (try (f) (finally (log/set-level! prev))))))
 
 (def bb-path
   "The Babashka that runs the fixtures, found the way the runner finds
@@ -79,11 +89,36 @@
     (let [data (ex-type #(process/run! ["clogem-definitely-not-a-program-7f3a" "x"] {}))]
       (is (= :process/binary-missing (:type data)))
       (is (= "clogem-definitely-not-a-program-7f3a" (:binary data)))))
-  (testing "a program the operating system cannot start"
+  (testing "a :cwd that is not a directory is an invalid option, named (not a third error type)"
     (with-temp-dir
       (fn [dir]
         (let [data (ex-type #(process/run! ["bb" "-e" "1"] {:cwd (str (fs/path dir "missing-dir"))}))]
-          (is (= :process/start-failed (:type data))))))))
+          (is (= :process/invalid-argv (:type data)))
+          (is (= :cwd (:option data))))
+        (let [file (str (fs/path dir "a-file"))
+              _ (spit file "not a directory")
+              data (ex-type #(process/run! ["bb" "-e" "1"] {:cwd file}))]
+          (is (= :process/invalid-argv (:type data)))
+          (is (= :cwd (:option data)))))))
+  (testing "a resolved program the operating system refuses to start is :process/binary-missing, with the cause"
+    (with-redefs [p/process (fn [& _]
+                              (throw (java.io.IOException. "Cannot run program \"bb\": Exec failed, error: 8 (Exec format error)")))]
+      (let [data (ex-type #(process/run! ["bb" "-e" "1"] {}))]
+        (is (= :process/binary-missing (:type data)))
+        (is (= "bb" (:binary data)) ":binary is the name the caller gave")
+        (is (= bb-path (:path data)) ":path is what it resolved to")
+        (is (str/includes? (str (:cause data)) "Exec format error")))))
+  (testing ":env must be a map of strings (a keyword key would set a variable named \":CLOGEM_X\")"
+    (doseq [env [{:CLOGEM_X "42"} {"CLOGEM_X" 42} "CLOGEM_X=42"]]
+      (let [data (ex-type #(process/run! ["bb" "-e" "1"] {:env env}))]
+        (is (= :process/invalid-argv (:type data)) (pr-str env))
+        (is (= :env (:option data)) (pr-str env)))))
+  (testing "a nil-valued option means the default, not an error (a module may forward an unset config value)"
+    (let [reply (run-fake {:timeout-ms nil :max-output-bytes nil :poll-ms nil :cancel nil :on-progress nil
+                           :cwd nil :env nil :stdin nil :bins nil}
+                          "--stdout" "defaults")]
+      (is (= 0 (:exit reply)))
+      (is (str/includes? (:out reply) "defaults")))))
 
 ;; ---------------------------------------------------------------------------
 ;; run!: the reply
@@ -197,6 +232,16 @@
       (let [gap (- (last @arrivals) (first @arrivals))]
         (is (<= 300 gap) (str "first and last block were " gap " ms apart"))))))
 
+(deftest run-bounds-the-progress-stream-at-max-output-bytes
+  (let [blocks (atom [])
+        reply (run-fake {:on-progress (fn [b] (swap! blocks conj b)) :max-output-bytes 1000}
+                        "--stdout-bytes" "200000" "--blocks" "2" "--sleep-ms" "10")]
+    (is (= 0 (:exit reply)))
+    (is (= "" (:out reply)) "nothing is accumulated")
+    (is (true? (:truncated? reply)) "a 200000-character line without a newline was cut at the cap")
+    (is (= 2 (count @blocks)) "the blocks after it still arrive")
+    (is (= ["continue" "end"] (mapv :progress @blocks)))))
+
 (deftest run-survives-a-failing-progress-callback
   (let [seen (atom 0)
         reply (run-fake {:on-progress (fn [_] (swap! seen inc) (throw (ex-info "boom" {})))}
@@ -277,7 +322,7 @@
         (is (map? (:format reply)))
         (is (= 2 (:nb_streams (:format reply))))
         (is (= "95.400000" (:duration (:format reply))))
-        (is (= (str/replace media "\\" "\\\\") (str/replace (:filename (:format reply)) "\\" "\\\\")))
+        (is (= media (:filename (:format reply))) "the fixture JSON-escapes backslashes and cheshire restores them")
         (is (vector? (:streams reply)))
         (is (= ["video" "audio"] (mapv :codec_type (:streams reply))))
         (is (= [0 1] (mapv :index (:streams reply))))
@@ -344,16 +389,25 @@
     (testing "the configured output cap applies, and the caller's opts win over it"
       (is (true? (:truncated? (run ctx ["fake-ffmpeg" fake-ffmpeg "--stdout-bytes" "500"] {}))))
       (is (false? (:truncated? (run ctx ["fake-ffmpeg" fake-ffmpeg "--stdout-bytes" "500"] {:max-output-bytes 10000})))))
-    (testing "the caller may add programs, the configuration wins on conflicts"
+    (testing "the caller's :bins add programs; on the same name the configuration wins (where the user's tool lives is the user's decision, ADR-0007)"
       (with-temp-dir
         (fn [dir]
           (let [reply (run ctx ["other-bb" fake-ffmpeg "--stdout" "added"] {:bins {"other-bb" bb-path}})]
             (is (= 0 (:exit reply)))
             (is (str/includes? (:out reply) "added")))
-          (let [reply (run ctx ["fake-ffmpeg" fake-ffmpeg "--stdout" "still-bb"]
-                           {:bins {"fake-ffmpeg" (str (fs/path dir "no-such-program"))}})]
-            (is (= 0 (:exit reply)))
-            (is (= bb-path (first (:argv reply))))))))
+          (let [bogus (str (fs/path dir "no-such-program"))
+                reply (run ctx ["fake-ffmpeg" fake-ffmpeg "--stdout" "config-wins"] {:bins {"fake-ffmpeg" bogus}})]
+            (is (= 0 (:exit reply)) "the caller's entry for a configured name is ignored")
+            (is (= bb-path (first (:argv reply))))
+            (is (str/includes? (:out reply) "config-wins")))
+          (let [run-bogus (process/runner (assoc-in config [:bins "fake-ffmpeg"] (str (fs/path dir "no-such-program"))))
+                data (ex-type #(run-bogus ctx ["fake-ffmpeg" fake-ffmpeg "--stdout" "x"] {:bins {"fake-ffmpeg" bb-path}}))]
+            (is (= :process/binary-missing (:type data)) "a configured path that does not resolve is reported, not worked around")
+            (is (= "fake-ffmpeg" (:binary data)))))))
+    (testing "a nil-valued option from the caller means the configured default"
+      (let [reply (run ctx ["fake-ffmpeg" fake-ffmpeg "--forever"] {:timeout-ms nil :max-output-bytes nil})]
+        (is (true? (:timed-out? reply)))
+        (is (nil? (:exit reply)))))
     (testing "nil opts are accepted (clogem.api/run-process! passes {} but a runtime may not)"
       (is (= 0 (:exit (run ctx ["fake-ffmpeg" fake-ffmpeg] nil)))))
     (testing "an unconfigured program is reported"

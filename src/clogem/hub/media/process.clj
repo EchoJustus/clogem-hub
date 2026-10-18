@@ -21,7 +21,8 @@
    `:on-progress`, stdout is read line by line as the `-progress pipe:1`
    blocks ffmpeg writes (`key=value` lines, a block ending at `progress=`)
    and each complete block is delivered as it arrives instead of being
-   accumulated into :out.
+   accumulated into :out; a line longer than the cap is cut there, so that
+   stream stays bounded too.
 
    The reply is the clogem.api contract:
    {:exit int-or-nil :out string :err string :duration-ms int
@@ -29,11 +30,13 @@
    where :exit is nil after a timeout or a cancel (the code a killed
    process reports means nothing: 143 or 137 on POSIX, 1 on Windows, which
    is also ffmpeg's ordinary failure code) and :argv is the resolved argv.
-   Throws ex-info {:type :process/invalid-argv} (also for an option of the
-   wrong shape, named in :option), {:type :process/binary-missing :binary
-   name} and, when the operating system refuses to start the program (a
-   missing working directory, a non-executable file), {:type
-   :process/start-failed :binary name}.
+   Throws only the two ex-info types of the clogem.api contract:
+   {:type :process/invalid-argv} (also for an option of the wrong shape or
+   a :cwd that is not a directory, named in :option) and {:type
+   :process/binary-missing :binary name}, the latter also when the
+   operating system refuses to start the resolved program (not executable,
+   permission denied), with its message in :cause. A nil-valued option
+   means the default.
 
    Sources (PD-11, read 2026-10-12): https://ffmpeg.org/ffmpeg.html
    (-progress: key=value lines, the last key of a block is progress with
@@ -133,18 +136,35 @@
        (catch Exception e
          (log/warn {:event :process/on-progress-failed :program program :error (ex-message e)}))))
 
+(defn- read-bounded-line
+  "The next line of `rdr` without its terminator, keeping at most `cap` of
+   its characters (the rest of an over-long line is read and dropped, so
+   memory stays bounded where BufferedReader.readLine would grow without
+   limit on a line that never ends); nil at the end of the stream. Returns
+   [line truncated?]."
+  [^java.io.Reader rdr cap]
+  (let [sb (StringBuilder.)]
+    (loop [n 0 truncated? false]
+      (let [c (try (.read rdr) (catch java.io.IOException _ -1))]
+        (cond
+          (= 10 c) [(str sb) truncated?]
+          (neg? c) (when (or (pos? n) truncated?) [(str sb) truncated?])
+          (< n cap) (do (.append sb (char c)) (recur (inc n) truncated?))
+          :else (recur n true))))))
+
 (defn- read-progress
   "Read `in` line by line, delivering every complete progress block to
-   `on-progress` on this thread. Returns {:text \"\" :truncated? false}:
-   nothing is accumulated."
-  [^java.io.InputStream in on-progress program]
+   `on-progress` on this thread. Returns {:text \"\" :truncated? bool}:
+   nothing is accumulated, and a line longer than `cap` characters is cut
+   there and reported as truncated (the blocks after it still arrive)."
+  [^java.io.InputStream in on-progress program cap]
   (with-open [rdr (io/reader in :encoding "UTF-8")]
-    (loop [block {}]
-      (when-let [line (try (.readLine ^java.io.BufferedReader rdr) (catch java.io.IOException _ nil))]
+    (loop [block {} truncated? false]
+      (if-let [[line cut?] (read-bounded-line rdr cap)]
         (let [[block done] (progress-step block line)]
           (when done (deliver-progress! on-progress done program))
-          (recur block)))))
-  {:text "" :truncated? false})
+          (recur block (or truncated? cut?)))
+        {:text "" :truncated? truncated?}))))
 
 (defn- join-reader
   "The reader's result, closing the stream to unblock it when it has not
@@ -185,6 +205,28 @@
     (str/blank? (first argv)) (invalid-argv! argv "the program name must not be blank")
     :else (vec argv)))
 
+(defn- cwd-problem
+  "Why `cwd` cannot be the working directory, or nil when it can (or is
+   not given). An unparseable path counts as not a directory."
+  [cwd]
+  (cond
+    (nil? cwd) nil
+    (not (string? cwd)) "must be a string"
+    (not (try (fs/directory? cwd) (catch Exception _ false))) "is not an existing directory"))
+
+(defn- invalid-cwd! [cwd problem cause]
+  (throw (ex-info (str "run-process!: :cwd " (pr-str cwd) " " problem)
+                  (cond-> {:type :process/invalid-argv :option :cwd :value cwd}
+                    cause (assoc :cause (ex-message cause)))
+                  cause)))
+
+(defn- without-nils
+  "`opts` without its nil-valued keys: a nil option means the host default
+   (a module forwarding an unset configuration value gets the default, not
+   an error). nil opts are an empty map."
+  [opts]
+  (into {} (remove (comp nil? val)) opts))
+
 (defn- check-opts! [{:keys [timeout-ms poll-ms max-output-bytes cancel on-progress env cwd stdin]}]
   (doseq [[k v] {:timeout-ms timeout-ms :poll-ms poll-ms :max-output-bytes max-output-bytes}]
     (when-not (and (integer? v) (pos? v))
@@ -194,25 +236,34 @@
     (throw (ex-info "run-process!: :cancel must be an atom" {:type :process/invalid-argv :option :cancel})))
   (when-not (or (nil? on-progress) (fn? on-progress))
     (throw (ex-info "run-process!: :on-progress must be a function" {:type :process/invalid-argv :option :on-progress})))
-  (when-not (or (nil? env) (map? env))
-    (throw (ex-info "run-process!: :env must be a map of strings" {:type :process/invalid-argv :option :env})))
-  (when-not (or (nil? cwd) (string? cwd))
-    (throw (ex-info "run-process!: :cwd must be a string" {:type :process/invalid-argv :option :cwd})))
+  (when-not (or (nil? env)
+                (and (map? env) (every? (fn [[k v]] (and (string? k) (string? v))) env)))
+    (throw (ex-info "run-process!: :env must be a map of strings (a keyword key would name the variable \":KEY\")"
+                    {:type :process/invalid-argv :option :env})))
+  (when-let [problem (cwd-problem cwd)]
+    (invalid-cwd! cwd problem nil))
   (when-not (or (nil? stdin) (string? stdin))
     (throw (ex-info "run-process!: :stdin must be a string" {:type :process/invalid-argv :option :stdin}))))
 
 (defn- start!
-  "Start the process, or ex-info :process/start-failed."
-  [argv {:keys [cwd env stdin]}]
+  "Start the resolved `argv` (`program` is the name the caller gave).
+   Whatever the operating system refuses is reported in the two types of
+   the clogem.api contract: a :cwd that stopped being a directory between
+   the option check and the start is :process/invalid-argv (:option :cwd);
+   anything else (a file that is not executable, permission denied) is
+   :process/binary-missing with the OS message in :cause."
+  [argv program {:keys [cwd env stdin]}]
   (try
     (p/process (cond-> {:cmd argv}
                  cwd (assoc :dir cwd)
-                 (seq env) (assoc :extra-env (into {} (map (fn [[k v]] [(str k) (str v)])) env))
+                 (seq env) (assoc :extra-env env)
                  stdin (assoc :in stdin)))
     (catch Exception e
-      (throw (ex-info (str "run-process!: cannot start " (first argv) ": " (ex-message e))
-                      {:type :process/start-failed :binary (first argv) :argv argv :cause (ex-message e)}
-                      e)))))
+      (if-let [problem (cwd-problem cwd)]
+        (invalid-cwd! cwd problem e)
+        (throw (ex-info (str "run-process!: cannot start " program " (" (first argv) "): " (ex-message e))
+                        {:type :process/binary-missing :binary program :path (first argv) :argv argv :cause (ex-message e)}
+                        e))))))
 
 (defn- kill!
   "destroy-tree, then destroyForcibly on the process and its descendants
@@ -245,19 +296,22 @@
    and return the reply map of the clogem.api contract (see the namespace
    doc). `opts`:
      :timeout-ms       kill after this long (default 600000)
-     :cwd              working directory
-     :env              extra environment variables (map of strings)
+     :cwd              working directory (an existing directory)
+     :env              extra environment variables (a map of string → string)
      :stdin            a string written to the process, then closed; without
                        it the process's stdin is closed at once (EOF)
      :on-progress      (fn [block]) called on the reader thread for every
                        complete -progress block; stdout is then not kept
      :cancel           an atom; reset it to true to kill the process
-     :max-output-bytes cap on :out and on :err, each (default 16 MiB)
+     :max-output-bytes cap on :out and on :err, each (default 16 MiB); with
+                       :on-progress it bounds each line of the progress
+                       stream instead
      :poll-ms          cancel and deadline polling interval (default 100)
      :bins             program name → path, consulted before PATH
-     :module           the calling module's id, for the log only"
+     :module           the calling module's id, for the log only
+   A nil-valued option means its default."
   [argv opts]
-  (let [opts (merge (:process config/defaults) opts)
+  (let [opts (merge (:process config/defaults) (without-nils opts))
         {:keys [timeout-ms poll-ms max-output-bytes cancel on-progress bins module]} opts
         argv (check-argv! argv)
         _ (check-opts! opts)
@@ -268,7 +322,7 @@
         argv (assoc argv 0 path)
         started (System/currentTimeMillis)
         deadline (+ started timeout-ms)
-        child (start! argv opts)
+        child (start! argv program opts)
         ^java.lang.Process proc (:proc child)
         ^java.io.InputStream stdout (:out child)
         ^java.io.InputStream stderr (:err child)]
@@ -276,7 +330,7 @@
       (try (.close ^java.io.OutputStream (:in child)) (catch Exception _ nil)))
     (log/debug {:event :process/started :program program :module module :pid (try (.pid proc) (catch Exception _ nil))})
     (let [out-reader (future (if on-progress
-                               (read-progress stdout on-progress program)
+                               (read-progress stdout on-progress program max-output-bytes)
                                (drain-capped stdout max-output-bytes)))
           err-reader (future (drain-capped stderr max-output-bytes))
           outcome (await-outcome proc deadline poll-ms cancel)
@@ -363,14 +417,15 @@
 (defn runner
   "The runtime's `:process` function, (fn [ctx argv opts] reply), for the
    hub `config`: the `:process` defaults (:timeout-ms :max-output-bytes
-   :poll-ms) sit under the caller's opts, the configured `:bins` win over
-   any the caller passes (the user's configuration decides where ffmpeg
-   lives; a module may add programs the configuration does not name), and
-   the calling module's id goes to the log."
+   :poll-ms) and the configured `:bins` sit under the caller's opts (a
+   nil-valued option means the default; the caller's :bins add programs
+   and, on the same name, win over the configured path), and the calling
+   module's id goes to the log. clogem.api does not expose :bins to
+   modules: a module names a program and the host resolves it."
   [config]
   (let [defaults (merge (:process config/defaults) (:process config))
         bins (:bins config)]
     (fn [ctx argv opts]
-      (let [opts (or opts {})]
+      (let [opts (without-nils opts)]
         (run! argv (merge defaults opts {:bins (merge (:bins opts) bins)
                                          :module (:module/id ctx)}))))))
