@@ -48,16 +48,21 @@
   [f]
   (let [dir (fs/create-temp-dir {:prefix "clogem-ui"})
         b (bus/new-bus)
-        st (store/open! {:path (str (fs/path dir "clogem.db")) :bus b})
-        rt (runtime/new-runtime {:config config/defaults :bus b :store st})
-        reg (registry/new-registry {:runtime rt :bus b :before-start (partial migrate-module! st)})
-        updates (atom [])]
-    (runtime/attach-registry! rt reg)
-    (bus/subscribe! b :resource/updated #(swap! updates conj %))
-    (try (f {:bus b :store st :registry reg :updates updates})
+        parts (atom {})]
+    ;; everything after the bus is built inside the try, so a failure while
+    ;; opening the store still stops the bus and removes the directory
+    (try (let [st (store/open! {:path (str (fs/path dir "clogem.db")) :bus b})
+               _ (swap! parts assoc :store st)
+               rt (runtime/new-runtime {:config config/defaults :bus b :store st})
+               reg (registry/new-registry {:runtime rt :bus b :before-start (partial migrate-module! st)})
+               _ (swap! parts assoc :registry reg)
+               updates (atom [])]
+           (runtime/attach-registry! rt reg)
+           (bus/subscribe! b :resource/updated #(swap! updates conj %))
+           (f {:bus b :store st :registry reg :updates updates}))
          (finally
-           (registry/stop-all! reg)
-           (store/close! st)
+           (some-> (:registry @parts) registry/stop-all!)
+           (some-> (:store @parts) store/close!)
            (bus/stop! b)
            (support/delete-tree! dir)))))
 
