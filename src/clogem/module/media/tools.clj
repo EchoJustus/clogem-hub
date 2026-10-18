@@ -151,7 +151,8 @@
 
    The path is made absolute and must be a regular file (else ex-info
    :media/not-found). The file is fingerprinted and probed (ffprobe gives
-   the duration; a file without one counts as 0 ms) and the id derived.
+   the duration; a file without one counts as 0 ms, in the row, the id and
+   the stored document alike) and the id derived.
    Then, in one transaction:
    - no row with this id → INSERT (created true);
    - a row with this id at this path → nothing changes;
@@ -179,7 +180,7 @@
         statements (cond-> []
                      displaced (conj [clear-path now displaced])
                      (= outcome :relinked) (conj [relink-item path now id])
-                     (= outcome :created) (conj [insert-item id path size fp duration (probe->json probed) now now]))]
+                     (= outcome :created) (conj [insert-item id path size fp duration (probe->json (assoc probed :duration-ms duration)) now now]))]
     (when (seq statements)
       (tx! ctx statements)
       (api/publish! ctx :media/registered {:id id :path path})

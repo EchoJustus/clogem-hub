@@ -128,6 +128,18 @@
                  (events rt)))
           (is (every? #(= :media (:event/source %)) (testkit/published rt))))))))
 
+(deftest a-file-without-a-duration-stores-0-in-the-row-and-in-the-document
+  (with-file
+    (fn [_ p]
+      (let [rt (kit {:process (fn [_ _] {:out "{\"format\":{},\"streams\":[]}"})})
+            r (tools/register (ctx rt) {:path p})
+            [[sql & params]] (first (testkit/txs rt))]
+        (is (= 0 (:duration-ms r)))
+        (is (= (fingerprint/media-id (fingerprint/fingerprint p) 0) (:id r)) "the id is derived from 0 ms")
+        (is (= tools/insert-item sql))
+        (is (= 0 (nth params 4)) "the duration_ms column")
+        (is (= 0 (:duration_ms (json/parse-string (nth params 5) true))) "the stored document carries the same value")))))
+
 (deftest registering-the-same-file-again-changes-nothing
   (with-file
     (fn [_ p]
@@ -263,10 +275,11 @@
           (is (= golden/duration-ms (:duration-ms r)))
           (is (map? (:format r)))
           (is (= [(probe-argv p)] (map :argv (testkit/processes rt))))))
-      (testing "a relative path is made absolute before the lookup"
+      (testing "a non-normalized path is normalized before the lookup and the probe"
         (let [rt (kit {})]
-          (tools/probe (ctx rt) {:path p})
-          (is (= [[tools/select-by-path p]] (testkit/queries rt)))))
+          (tools/probe (ctx rt) {:path (str (fs/path dir "sub" ".." "clip.mp4"))})
+          (is (= [[tools/select-by-path p]] (testkit/queries rt)))
+          (is (= [(probe-argv p)] (map :argv (testkit/processes rt))))))
       (testing "a registered, unchanged file answers from its row"
         (let [rt (kit {:rows [(assoc (row-for p) :probe (stored-probe-json))]})
               r (tools/probe (ctx rt) {:path p})]
@@ -306,4 +319,6 @@
                  (dissoc doc :probe)))
           (is (= "95.400000" (get-in doc [:probe :format :duration])) "the stored document, parsed, not a nested string"))
         (is (nil? (resources/item (ctx rt) {:uri "clogem://media/item/m-nope" :params {:id "m-nope"}})))
-        (is (nil? (resources/item (ctx rt) {:uri "clogem://media/item/" :params {}})))))))
+        (let [queries-before (count (testkit/queries rt))]
+          (is (nil? (resources/item (ctx rt) {:uri "clogem://media/item/" :params {}})))
+          (is (= queries-before (count (testkit/queries rt))) "a missing template variable runs no SELECT"))))))

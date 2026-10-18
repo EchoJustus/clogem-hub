@@ -120,9 +120,10 @@
           (is (= [{:id id :path p :size 8 :duration_ms golden/duration-ms :has_probe 1}] (rows store)))
           (is (= ["ffprobe" "-v" "error" "-print_format" "json" "-show_format" "-show_streams" "-show_error" p] (second @argvs)))
           (is (wait-for #(= 2 (count @events)) 3000))
-          (is (= [[:media/registered :media {:id id :path p}]
-                  [:resource/updated :media {:uri (str "clogem://media/item/" id)}]]
-                 (map (juxt :event/type :event/source :event/payload) @events))))
+          (is (= #{[:media/registered :media {:id id :path p}]
+                   [:resource/updated :media {:uri (str "clogem://media/item/" id)}]}
+                 (set (map (juxt :event/type :event/source :event/payload) @events)))
+              "both events; each subscription delivers on its own thread, so their order is not fixed"))
         (testing "re-register is idempotent"
           (is (= (assoc r :created false) (register {:path p})))
           (is (= 1 (count (rows store))))
@@ -136,7 +137,10 @@
               (is (= [id moved false true] ((juxt :id :path :created :relinked) r2)))
               (is (= [{:id id :path moved :size 8 :duration_ms golden/duration-ms :has_probe 1}] (rows store)))
               (is (wait-for #(= 4 (count @events)) 3000))
-              (is (= [:media/registered {:id id :path moved}] ((juxt :event/type :event/payload) (nth @events 2)))))
+              (is (= #{[:media/registered {:id id :path moved}]
+                       [:resource/updated {:uri (str "clogem://media/item/" id)}]}
+                     (set (map (juxt :event/type :event/payload) (drop 2 @events))))
+                  "the relink's two events, in either order"))
             (testing "a changed file gets a new id and the old row loses its path"
               (fs/write-bytes moved (.getBytes "clip-two" "UTF-8"))
               (let [r3 (register {:path moved})

@@ -15,7 +15,8 @@
 
 (defn item
   "clogem://media/item/{id}: the row of media `id` as JSON (see
-   clogem.module.media.tools/row->item), or nil for an unknown id."
+   clogem.module.media.tools/row->item), or nil for an unknown id. A
+   missing template variable is nil and runs no query."
   [ctx {:keys [params]}]
-  (when-let [row (tools/find-by-id ctx (str (:id params)))]
+  (when-let [row (tools/find-by-id ctx (:id params))]
     {:mime-type "application/json" :text (tools/item-json row)}))
