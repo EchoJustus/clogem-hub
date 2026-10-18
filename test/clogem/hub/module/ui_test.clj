@@ -6,7 +6,7 @@
 ;;
 ;; SPDX-License-Identifier: EPL-2.0
 
-(ns clogem.hub.builtin.ui-test
+(ns clogem.hub.module.ui-test
   "The built-in `ui` module through the hub itself: a real bus, a store on
    a temporary database, the hub runtime and the registry, whose
    before-start hook runs the module's migrations as the daemon does. A
@@ -178,7 +178,8 @@
     (fn [{:keys [bus store registry updates]}]
       (is (= :ready (:status (registry/register! registry ui-manifest))))
       (doseq [payload [{} {:client 5 :command {}} {:client "gui"} {:command {:x 1}}
-                       {:client "gui" :command "nope"} {:client "bad client" :command {}}]]
+                       {:client "gui" :command "nope"} {:client "bad client" :command {}}
+                       {:client "gui\n" :command {}}]]
         (bus/publish! bus (event/event :player :ui/command payload)))
       ;; the subscriber handles its channel in order: when the valid command
       ;; has landed, every invalid one before it has been dropped

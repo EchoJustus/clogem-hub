@@ -12,7 +12,7 @@
    drives the module's `:ui/command` handler. Module test namespaces may
    require only the kit besides clojure.* and the module itself (the lint's
    module-isolation rule), so the same module through the real bus, store,
-   runtime and registry is proven in clogem.hub.builtin.ui-test."
+   runtime and registry is proven in clogem.hub.module.ui-test."
   (:require [cheshire.core :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -98,13 +98,14 @@
     (doseq [payload [{} {:client 5 :command {}} {:client "gui"} {:command {:x 1}}
                      {:client "gui" :command "nope"} {:client "gui" :command [1 2]}
                      {:client "" :command {}} {:client "bad client" :command {}}
-                     {:client "a/b" :command {}} {:client (apply str (repeat 65 "a")) :command {}}]]
+                     {:client "a/b" :command {}} {:client (apply str (repeat 65 "a")) :command {}}
+                     {:client "gui\n" :command {}}]]
       (kit/deliver! rt :ui/command payload :player)
       (is (nil? (inbox/receive! ctx payload)) (pr-str payload)))
     (is (empty? (kit/txs rt)) "nothing is written")
     (is (empty? (kit/published rt)) "nothing is announced")
     (let [dropped (filter #(= "ui command dropped" (get-in % [:event :msg])) (kit/logged rt))]
-      (is (= 20 (count dropped)) "every bad payload is logged, through deliver! and directly")
+      (is (= 22 (count dropped)) "every bad payload is logged, through deliver! and directly")
       (is (every? #(= [:warn :invalid-payload] [(:level %) (get-in % [:event :reason])]) dropped))
       (is (every? #(some? (get-in % [:event :problems])) dropped)))
     (testing "a payload wider than the contract is accepted: the inbox ignores extra keys"

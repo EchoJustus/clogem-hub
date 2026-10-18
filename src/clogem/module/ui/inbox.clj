@@ -28,7 +28,9 @@
   "A client id as clients.edn admits it and as a resource URI segment can
    carry it: a letter or digit, then letters, digits, `_`, `.` or `-`, at
    most 64 characters in all."
-  #"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+  ;; \z, not $: malli's :re uses re-find, where $ also matches before a
+  ;; trailing newline, and the resource lookup uses re-matches
+  #"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\z")
 
 (def Payload
   "What a `:ui/command` payload must look like. Open: a publisher may add
