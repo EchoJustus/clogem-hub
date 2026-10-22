@@ -21,13 +21,20 @@ What the probe records in `build\probe.json` (paste it into the workspace sessio
 
 1. whether the publisher cache folder exists at `%LOCALAPPDATA%\Publishers\<PublisherId>\clogem`
    before and after the first launch, and whether the daemon wrote `daemon.edn` there (the
-   physical path is community knowledge; Microsoft documents only the WinRT accessor);
+   physical layout is the one Microsoft's own Teams deployment pages show for
+   `Publishers\8wekyb3d8bbwe\…`; the app-model reference documents only the WinRT accessor,
+   which has a reported failure for Desktop Bridge apps on Windows 10 2004/20H2, so the
+   launcher uses the path, never WinRT);
 2. whether a packaged process's writes under `%LOCALAPPDATA%\clogem\` land there or in the
-   package's virtualized `%LOCALAPPDATA%\Packages\<pfn>\LocalCache\…` (file-system
-   virtualization applies to packaged desktop apps and is deleted at uninstall), both for the
-   launcher and for the child `bb.exe`;
-3. whether the launcher can start the in-package `bb.exe` at all (a child process of a packaged
-   app may need the breakaway attribute or its own `<Application>` entry);
+   package's virtualized `%LOCALAPPDATA%\Packages\<pfn>\LocalCache\…`: Microsoft scopes
+   AppData virtualization to appContainer apps and does not say whether a
+   `packagedClassicApp`/`mediumIL` package is virtualized, so this is measured, for the launcher
+   and for the child `bb.exe` (per-folder exclusions exist only from Windows 11; on 19044 the
+   only switch is the all-or-nothing `unvirtualizedResources` restricted capability);
+3. whether the launcher can start the in-package `bb.exe`: Microsoft documents that child
+   processes of a packaged desktop app break away from the package by default
+   (`PROCESS_CREATION_DESKTOP_APP_BREAKAWAY_*` on `UpdateProcThreadAttribute`), and the
+   community failures involve launches through `cmd.exe`; the launcher starts `bb.exe` directly;
 4. the startup task's state after the first launch;
 5. protocol activation reaching the launcher with the URI.
 
@@ -37,6 +44,11 @@ Run (elevated PowerShell, in the hub checkout with `..\clogem-sdk` next to it):
 powershell -ExecutionPolicy Bypass -File packaging\msix\build-msix.ps1 -BbExe C:\tools\bb\bb.exe
 powershell -ExecutionPolicy Bypass -File packaging\msix\build-msix.ps1 -BbExe C:\tools\bb\bb.exe -Uninstall
 ```
+
+Known constraints the probe does not change: the startup task registers only after the user
+has launched the app once, and a task the user disables in Task Manager cannot be re-enabled by
+the app; web one-click install through `ms-appinstaller:` is disabled by default since December
+2023, so sideloading is a file download plus `Add-AppxPackage` (the Store is the product channel).
 
 It needs the Windows 10/11 SDK (MakeAppx, SignTool), Flutter 3.47.7 (`dart compile exe`) and
 Babashka. It creates a self-signed development certificate whose subject equals the manifest
