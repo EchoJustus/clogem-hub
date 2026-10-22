@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  © 2026 EchoJustus (Email: EchoJustus.Studio@outlook.com)
+
+  This program and the accompanying materials are made available under the
+  terms of the Eclipse Public License 2.0 which is available at
+  https://www.eclipse.org/legal/epl-2.0
+
+  SPDX-License-Identifier: EPL-2.0
+
+  S05 prototype manifest for the hub package (ADR-0006, hub ADR-0007 follow-up):
+  a full-trust packaged desktop app whose executable is the launcher that runs
+  `bb daemon` from the package root. build-msix.ps1 replaces the PLACEHOLDER
+  values from its parameters before packing. Elements and their minimum OS
+  builds (learn.microsoft.com schema pages, read 2026-10-22): uap10
+  RuntimeBehavior/TrustLevel 19041, rescap runFullTrust 10586,
+  desktop:StartupTask 14393, uap3:Protocol 14393, uap3 appExecutionAlias
+  14393, windows.publisherCacheFolders (foundation namespace); the package
+  declares MinVersion 10.0.19044.0 (Windows 10 21H2, the LTSC 2021 level).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 uap10 desktop rescap">
+
+  <Identity Name="PLACEHOLDER_IDENTITY_NAME"
+            Publisher="PLACEHOLDER_PUBLISHER"
+            Version="0.5.0.0"
+            ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Clogem Hub (prototype)</DisplayName>
+    <PublisherDisplayName>PLACEHOLDER_PUBLISHER_DISPLAY_NAME</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Prototype of the Clogem hub daemon package: full trust, startup task, publisher cache folder, execution alias, protocol activation.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19044.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="ClogemHub"
+                 Executable="clogem_hub_launcher.exe"
+                 uap10:RuntimeBehavior="packagedClassicApp"
+                 uap10:TrustLevel="mediumIL">
+      <uap:VisualElements DisplayName="Clogem Hub (prototype)"
+                          Description="Runs the Clogem hub daemon."
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- Start the daemon at logon (opt-in for the user through Task Manager / Settings;
+             Enabled="true" is honoured after the app ran once). -->
+        <desktop:Extension Category="windows.startupTask"
+                           Executable="clogem_hub_launcher.exe"
+                           EntryPoint="Windows.FullTrustApplication"
+                           uap10:Parameters="daemon">
+          <desktop:StartupTask TaskId="ClogemHubDaemon" Enabled="true" DisplayName="Clogem Hub" />
+        </desktop:Extension>
+        <!-- The command-line door: `clogem-hub` in any shell runs the launcher
+             (S07 moves the link opener here as a second alias). -->
+        <uap3:Extension Category="windows.appExecutionAlias"
+                        Executable="clogem_hub_launcher.exe"
+                        EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="clogem-hub.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+        <!-- Protocol activation mechanics only: a throwaway scheme for the VM test.
+             The product scheme clogem:// is declared by the app packages, never by
+             the hub (workspace ADR-0006 decision 9); remove before any submission. -->
+        <uap3:Extension Category="windows.protocol">
+          <uap3:Protocol Name="clogem-hubproto" Parameters="--uri &quot;%1&quot;">
+            <uap:DisplayName>Clogem hub prototype link</uap:DisplayName>
+          </uap3:Protocol>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Extensions>
+    <!-- Shared by every package of this publisher on this user's profile: where
+         daemon.edn and the client token files are published (ADR-0006 decision 5). -->
+    <Extension Category="windows.publisherCacheFolders">
+      <PublisherCacheFolders>
+        <Folder Name="clogem" />
+      </PublisherCacheFolders>
+    </Extension>
+  </Extensions>
+</Package>
