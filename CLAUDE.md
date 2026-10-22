@@ -43,6 +43,7 @@ test/clogem/…   test/fixtures/jsonrpc/*.json (golden JSON-RPC fixtures)   test
 docs/adr/  docs/mcp-compliance.md  docs/deps.md
 src/clogem/hub/{modules,llm}.clj  src/clogem/hub/media/process.clj                     test/fixtures/process/ (fake ffmpeg and ffprobe scripts)
 src/clogem/module/{media,ui}/…  resources/clogem/module/{media,ui}/{manifest.edn,migrations/NNNN-slug.sql}
+packaging/msix/ (S05 prototype: AppxManifest.xml, the Dart launcher, build-msix.ps1; owner-run, not wired into bb.edn)
 planned: bin/clogem-open (S07), src/clogem/hub/uri.clj, docs/roadmap.md
 ```
 
