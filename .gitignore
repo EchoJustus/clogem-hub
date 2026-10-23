@@ -10,3 +10,9 @@
 # Local-only Claude Code files
 CLAUDE.local.md
 .claude/settings.local.json
+
+# MSIX prototype outputs (packaging/msix/build-msix.ps1: stage, .msix, the development
+# signing key, probe.json) and the launcher's Dart tooling
+packaging/msix/build/
+packaging/msix/launcher/.dart_tool/
+packaging/msix/launcher/pubspec.lock

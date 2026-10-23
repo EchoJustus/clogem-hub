@@ -19,12 +19,15 @@
 #
 # Prerequisites: Flutter 3.47.7 (for dart compile exe), the Windows 10/11 SDK
 # (MakeAppx.exe, SignTool.exe under "C:\Program Files (x86)\Windows Kits\10\bin\<build>\x64"),
-# Babashka 1.13.225 windows-amd64 (its bb.exe is copied into the package).
+# Babashka 1.13.225 windows-amd64 (its bb.exe is copied into the package), and
+# GitHub reachable at build time (the SQLite pod zip and its registry manifest
+# are staged into the package so the first launch downloads nothing, PD-9).
 # Outputs: packaging\msix\build\ (gitignored): stage\ (the package layout),
-# ClogemHubProto.msix, ClogemHubProto.pfx, probe.json (what the VM showed).
+# ClogemHubProto.msix, ClogemHubProto.pfx (the development signing key: never
+# commit it), probe.json (what the VM showed).
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)] [string]$BbExe,
+  [string]$BbExe = "",
   [string]$IdentityName = "ClogemHubProto",
   [string]$Publisher = "CN=Clogem Dev",
   [string]$PublisherDisplayName = "Clogem (dev)",
@@ -32,6 +35,7 @@ param(
   [switch]$Uninstall
 )
 $ErrorActionPreference = "Stop"
+if (-not $Uninstall -and $BbExe -eq "") { throw "-BbExe <path to bb.exe> is required to build (only -Uninstall works without it)" }
 $here = $PSScriptRoot
 $hub = Resolve-Path (Join-Path $here "..\..")
 $sdk = Resolve-Path (Join-Path $hub "..\clogem-sdk")
@@ -61,8 +65,20 @@ New-Item -ItemType Directory -Force -Path $stage, (Join-Path $stage "bin"), (Joi
 Copy-Item $BbExe (Join-Path $stage "bin\bb.exe")
 foreach ($d in "src", "resources", "bb.edn") { Copy-Item -Recurse (Join-Path $hub $d) (Join-Path $stage "hub\$d") }
 foreach ($d in "src", "examples", "bb.edn", "deps.edn") { Copy-Item -Recurse (Join-Path $sdk $d) (Join-Path $stage "clogem-sdk\$d") }
-# the hub's bb.edn depends on ../clogem-sdk: inside the package the SDK sits next to hub\
-(Get-Content (Join-Path $stage "hub\bb.edn")) -replace '"\.\./clogem-sdk"', '"../clogem-sdk"' | Set-Content (Join-Path $stage "hub\bb.edn")
+# the hub's bb.edn depends on {:local/root "../clogem-sdk"}; bb resolves bb.edn-relative paths
+# from the bb.edn's directory, and the staged clogem-sdk\ sits next to hub\, so it is copied unchanged.
+# The SQLite pod (org.babashka/go-sqlite3 0.2.8) in the pod registry's repository layout:
+#   pods\repository\org.babashka\go-sqlite3\0.2.8\manifest.edn and \windows\x86_64\<executable>
+# (the launcher fixes the OS name and arch Babashka uses for that path).
+Write-Host "== SQLite pod (downloaded now so the packaged daemon never does)"
+$podDir = Join-Path $stage "pods\repository\org.babashka\go-sqlite3\0.2.8"
+$podBin = Join-Path $podDir "windows\x86_64"
+New-Item -ItemType Directory -Force -Path $podBin | Out-Null
+Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/babashka/pod-registry/master/manifests/org.babashka/go-sqlite3/0.2.8/manifest.edn" -OutFile (Join-Path $podDir "manifest.edn")
+$podZip = Join-Path $build "pod-babashka-go-sqlite3-0.2.8-windows-amd64.zip"
+Invoke-WebRequest -UseBasicParsing "https://github.com/babashka/pod-babashka-go-sqlite3/releases/download/v0.2.8/pod-babashka-go-sqlite3-0.2.8-windows-amd64.zip" -OutFile $podZip
+Expand-Archive -Path $podZip -DestinationPath $podBin -Force
+if (-not (Test-Path (Join-Path $podBin "pod-babashka-go-sqlite3.exe"))) { throw "pod-babashka-go-sqlite3.exe not found after extracting $podZip (archive layout changed?)" }
 # placeholder tile images (solid squares) so MakeAppx accepts the manifest
 Add-Type -AssemblyName System.Drawing
 foreach ($spec in @(@("StoreLogo.png", 50), @("Square150x150Logo.png", 150), @("Square44x44Logo.png", 44))) {
@@ -75,11 +91,14 @@ Write-Host "== launcher (dart compile exe)"
 Push-Location (Join-Path $here "launcher")
 try {
   dart pub get | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "dart pub get failed" }
   dart compile exe clogem_hub_launcher.dart -o (Join-Path $stage "clogem_hub_launcher.exe")
+  if ($LASTEXITCODE -ne 0) { throw "dart compile exe failed" }
 } finally { Pop-Location }
 
 Write-Host "== manifest"
-(Get-Content (Join-Path $here "AppxManifest.xml")) `
+# -Raw -Encoding UTF8: Windows PowerShell 5.1 reads a BOM-less UTF-8 file as ANSI otherwise
+(Get-Content -Raw -Encoding UTF8 (Join-Path $here "AppxManifest.xml")) `
   -replace "PLACEHOLDER_IDENTITY_NAME", $IdentityName `
   -replace "PLACEHOLDER_PUBLISHER_DISPLAY_NAME", $PublisherDisplayName `
   -replace "PLACEHOLDER_PUBLISHER", $Publisher |
@@ -116,10 +135,17 @@ $probe.package_family_name = $pkg.PackageFamilyName
 $publisherId = $pkg.PackageFamilyName.Split("_")[-1]
 $probe.publisher_cache_folder = "$env:LOCALAPPDATA\Publishers\$publisherId\clogem"
 $probe.publisher_cache_folder_exists_before_launch = Test-Path $probe.publisher_cache_folder
-# 1. the execution alias runs the launcher, which runs bb daemon; stop it after a few seconds
+$profilePod = "$env:USERPROFILE\.babashka\pods\repository\org.babashka\go-sqlite3"
+$probe.pod_in_profile_before_launch = Test-Path $profilePod
+# 1. the execution alias runs the launcher, which runs bb daemon; wait for daemon.edn (up to
+#    120 s: the first start loads the pod and runs the migrations), then stop it
 $proc = Start-Process -FilePath "clogem-hub.exe" -ArgumentList "daemon" -PassThru
-Start-Sleep -Seconds 8
-$probe.daemon_edn_in_shared_dir = Test-Path (Join-Path $probe.publisher_cache_folder "daemon.edn")
+$daemonEdn = Join-Path $probe.publisher_cache_folder "daemon.edn"
+$waited = 0
+while (-not (Test-Path $daemonEdn) -and $waited -lt 120) { Start-Sleep -Seconds 2; $waited += 2 }
+$probe.daemon_edn_in_shared_dir = Test-Path $daemonEdn
+$probe.seconds_until_daemon_edn = $waited
+$probe.pod_downloaded_to_profile = (-not $probe.pod_in_profile_before_launch) -and (Test-Path $profilePod)
 $probe.publisher_cache_folder_exists_after_launch = Test-Path $probe.publisher_cache_folder
 $probe.launcher_log_real_localappdata = Test-Path "$env:LOCALAPPDATA\clogem\run\launcher.log"
 $probe.launcher_log_virtualized = (Get-ChildItem -Recurse -Filter launcher.log "$env:LOCALAPPDATA\Packages\$($pkg.PackageFamilyName)" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName

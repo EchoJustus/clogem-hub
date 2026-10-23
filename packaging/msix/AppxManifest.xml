@@ -60,16 +60,20 @@
         <uap:DefaultTile />
       </uap:VisualElements>
       <Extensions>
-        <!-- Start the daemon at logon (opt-in for the user through Task Manager / Settings;
-             Enabled="true" is honoured after the app ran once). -->
+        <!-- Start the daemon at logon. Enabled="true" here so the registration is observable in
+             the probe (it is honoured after the app ran once); it inverts workspace ADR-0006
+             decision 3 (an opt-in task the user enables in the hub's settings), so the product
+             manifest says Enabled="false" and the hub enables it with RequestEnableAsync. -->
         <desktop:Extension Category="windows.startupTask"
                            Executable="clogem_hub_launcher.exe"
                            EntryPoint="Windows.FullTrustApplication"
                            uap10:Parameters="daemon">
           <desktop:StartupTask TaskId="ClogemHubDaemon" Enabled="true" DisplayName="Clogem Hub" />
         </desktop:Extension>
-        <!-- The command-line door: `clogem-hub` in any shell runs the launcher
-             (S07 moves the link opener here as a second alias). -->
+        <!-- The command-line door: `clogem-hub` in any shell runs the launcher. S07 adds the
+             link opener: the desktop-extensions page allows one alias per application while the
+             uap3:AppExecutionAlias schema allows up to 100 choices, so S07 either adds a second
+             Application for the opener or verifies a second alias on the 19044 VM. -->
         <uap3:Extension Category="windows.appExecutionAlias"
                         Executable="clogem_hub_launcher.exe"
                         EntryPoint="Windows.FullTrustApplication">
@@ -79,11 +83,11 @@
         </uap3:Extension>
         <!-- Protocol activation mechanics only: a throwaway scheme for the VM test.
              The product scheme clogem:// is declared by the app packages, never by
-             the hub (workspace ADR-0006 decision 9); remove before any submission. -->
+             the hub (workspace ADR-0006 decision 8); remove before any submission.
+             No DisplayName child: the schema page shows it as optional and names its
+             namespace inconsistently, so the element is left out. -->
         <uap3:Extension Category="windows.protocol">
-          <uap3:Protocol Name="clogem-hubproto" Parameters="--uri &quot;%1&quot;">
-            <uap:DisplayName>Clogem hub prototype link</uap:DisplayName>
-          </uap3:Protocol>
+          <uap3:Protocol Name="clogem-hubproto" Parameters="--uri &quot;%1&quot;" />
         </uap3:Extension>
       </Extensions>
     </Application>

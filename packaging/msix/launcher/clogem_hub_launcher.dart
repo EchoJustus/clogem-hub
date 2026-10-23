@@ -6,17 +6,22 @@
 //
 // SPDX-License-Identifier: EPL-2.0
 
-// S05 prototype: the executable of the hub MSIX package. A packaged desktop
-// app's Executable gets no fixed arguments and an unknown working directory,
-// so this launcher (the manifest's Application, startup task, execution alias
-// and protocol handler all point at it) does what the manifest cannot:
+// S05 prototype: the executable of the hub MSIX package. The manifest itself
+// can pass fixed command-line parameters (uap10:Parameters, build 19041+; the
+// startup task uses it) and, on uap11-capable builds, a start directory
+// (uap11:CurrentDirectoryPath), but not an environment variable derived from
+// the package identity, and the 19044 floor predates uap11. So this launcher
+// (the manifest's Application, startup task, execution alias and protocol
+// handler all point at it):
 //   - chdir to the package root (the directory holding this executable),
-//   - name the publisher cache folder for the daemon (CLOGEM_SHARED_DIR,
+//   - names the publisher cache folder for the daemon (CLOGEM_SHARED_DIR,
 //     ADR-0006 decision 5) from the package family name,
-//   - run `bin\bb.exe --config hub\bb.edn daemon` (or the arguments it was
+//   - points Babashka at the SQLite pod staged in the package (pods\), so the
+//     first launch downloads nothing,
+//   - runs `bin\bb.exe --config hub\bb.edn daemon` (or the arguments it was
 //     given: the startup task passes "daemon", the protocol handler
 //     `--uri <link>`, the alias whatever the shell typed),
-//   - append one line per launch to launcher.log, so the VM test shows where a
+//   - appends one line per launch to launcher.log, so the VM test shows where a
 //     packaged process's writes under %LOCALAPPDATA% actually land
 //     (file-system virtualization) and whether the child bb.exe starts at all.
 // Everything observable is written, nothing is read from the user.
@@ -63,8 +68,9 @@ void freeBytes(Pointer<NativeType> p) => _free(p.cast<Void>());
 
 /// %LOCALAPPDATA%\Publishers\<PublisherId>\clogem, the folder every package of
 /// the publisher shares (manifest windows.publisherCacheFolders). The physical
-/// path is community knowledge, not documented by Microsoft: the VM test
-/// records whether it exists after the first launch.
+/// path appears on Microsoft's Teams admin pages (for PublisherId 8wekyb3d8bbwe)
+/// and in community reports, not in the app-model reference: the VM test
+/// records whether it exists for this publisher after the first launch.
 String? publisherCacheFolder(String? pfn) {
   final local = Platform.environment['LOCALAPPDATA'];
   if (pfn == null || local == null) return null;
@@ -78,7 +84,18 @@ void main(List<String> argv) async {
   final pfn = packageFamilyName();
   final shared = publisherCacheFolder(pfn);
   final args = argv.isEmpty ? ['daemon'] : argv;
-  final env = <String, String>{if (shared != null) 'CLOGEM_SHARED_DIR': shared};
+  // pods\ holds the SQLite pod in the registry layout (build-msix.ps1); the OS
+  // name and arch are fixed so Babashka looks under windows\x86_64 (it would
+  // otherwise derive "windows_10" or "windows_11" from the OS name).
+  final pods = Directory('$root\\pods');
+  final env = <String, String>{
+    if (shared != null) 'CLOGEM_SHARED_DIR': shared,
+    if (pods.existsSync()) ...{
+      'BABASHKA_PODS_DIR': pods.path,
+      'BABASHKA_PODS_OS_NAME': 'Windows',
+      'BABASHKA_PODS_OS_ARCH': 'amd64',
+    },
+  };
   final local = Platform.environment['LOCALAPPDATA'] ?? root;
   final logDir = Directory('$local\\clogem\\run');
   String outcome;
@@ -105,6 +122,7 @@ void main(List<String> argv) async {
     'package_family_name': pfn,
     'shared_dir': shared,
     'shared_dir_exists': shared == null ? null : Directory(shared).existsSync(),
+    'pods_dir': pods.existsSync() ? pods.path : null,
     'args': args,
     'outcome': outcome,
     'log_dir': logDir.path,
